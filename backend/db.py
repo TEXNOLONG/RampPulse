@@ -6,6 +6,7 @@ import sqlite3
 class DB:
     def __init__(self, path):
         self.c = sqlite3.connect(path, check_same_thread=False)
+        self.c.execute("PRAGMA busy_timeout=5000")
         self.c.executescript(
             """
             CREATE TABLE IF NOT EXISTS requests (id INTEGER PRIMARY KEY, data TEXT NOT NULL);

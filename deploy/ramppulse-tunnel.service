@@ -1,0 +1,20 @@
+[Unit]
+Description=RampPulse temporary HTTPS tunnel for contest demo
+After=network-online.target ramppulse.service
+Wants=network-online.target
+Requires=ramppulse.service
+
+[Service]
+Type=simple
+User=ramppulse
+Group=ramppulse
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+{"local-crm-window-controls":{"identifier":"local-crm-window-controls","description":"Allow the loopback CRM interface to close its own desktop window.","remote":{"urls":["http://127.0.0.1:*"]},"local":true,"windows":["main"],"permissions":["core:window:allow-close","core:event:allow-listen"]}}

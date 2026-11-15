@@ -1,6 +1,7 @@
 """Контрольные сценарии алгоритма. Запуск: python -m tests.test_engine  (или pytest)"""
 import json
 import pathlib
+import time
 
 from backend.db import DB
 from backend.engine import Engine, NORM_SEC, detect_qual
@@ -37,21 +38,63 @@ def test_2_different_quals():
         == ["Планер", "Авионика", "Двигатель"]
 
 
-def test_3_min_dist_preferred():
-    """Теперь предпочитается ближайший по пути, а не самый быстрый."""
+def test_3_fastest_eta_preferred():
+    """Система не выбирает путь с более долгим ETA, если есть быстрее."""
     cfg = [{"name": "А", "qual": "Планер", "speed": 2.0, "base": "BASE3"},
            {"name": "Б", "qual": "Планер", "speed": 5.2, "base": "BASE1"}]
     e = make(cfg)
+    # Isolate pedestrian ETA comparison; dedicated transport is covered below.
+    for vehicle in e.engineer_vehicles.values():
+        vehicle.status = "returning"
     r = e.create_request("ВС-02", "x", "Планер")
     cand = {c["name"]: c for c in r["candidates"]}
     assert cand["А"]["dist"] < cand["Б"]["dist"]          # А ближе
-    assert cand["А"]["eta"] > cand["Б"]["eta"]            # но Б быстрее
-    # Теперь выбирается ближайший по пути
-    assert e.techs[r["tech_id"]].name == "А"
+    assert cand["А"]["eta_walk"] > cand["Б"]["eta_walk"]  # но Б быстрее
+    # Выбирается более быстрый техник, как требует критерий задания.
+    assert e.techs[r["tech_id"]].name == "Б"
+    assert r["eta"] == cand["Б"]["eta"]
+    assert r["eta"] == min(c["eta"] for c in cand.values() if c["ok"])
+
+
+def test_engineer_vehicle_is_selected_when_it_reduces_eta():
+    e = make()
+    r = e.create_request("ВС-03", "Вибрация двигателя", "Двигатель")
+    selected = next(c for c in r["candidates"] if c["tech_id"] == r["tech_id"])
+    assert selected["mode"] == "vehicle"
+    assert r["travel_mode"] == "vehicle"
+    assert r["vehicle_id"] == selected["vehicle_id"]
+    assert selected["eta"] < selected["eta_walk"]
+    vehicle = e.engineer_vehicles[r["vehicle_id"]]
+    assert vehicle.status == "to_pickup"
+    assert vehicle.route is not None and len(vehicle.route.points) >= 1
+
+
+def test_engineer_vehicle_pickup_arrival_and_return():
+    e = make()
+    r = e.create_request("ВС-04", "Повреждение обшивки", "Планер")
+    assert r["travel_mode"] == "vehicle"
+    vehicle = e.engineer_vehicles[r["vehicle_id"]]
+    run(e, 500)
+    assert r["status"] == "arrived"
+    assert e.techs[r["tech_id"]].vehicle_id is None
+    assert vehicle.status in ("returning", "idle")
+    run(e, 500)
+    assert vehicle.status == "idle"
+
+
+def test_vehicle_eta_updates_during_pickup_and_boarding():
+    e = make()
+    r = e.create_request("ВС-05", "Перегрев двигателя", "Двигатель")
+    assert r["travel_mode"] == "vehicle"
+    initial = e._req_view(r)["eta_left"]
+    run(e, 10)
+    assert e._req_view(r)["eta_left"] < initial
 
 def test_4_norm_filter():
     cfg = [{"name": "Медленный", "qual": "Планер", "speed": 0.5, "base": "BASE1"}]
     e = make(cfg)
+    for vehicle in e.engineer_vehicles.values():
+        vehicle.status = "returning"
     r = e.create_request("ВС-05", "x", "Планер")
     assert r["status"] == "waiting" and r["tech_id"] is None
 
@@ -126,6 +169,8 @@ def test_emergency_preempts_busy_tech():
 
 def test_emergency_when_norm_unreachable_still_assigns():
     e = make([{"name": "Медленный", "qual": "Планер", "speed": 0.5, "base": "BASE1"}])
+    for vehicle in e.engineer_vehicles.values():
+        vehicle.status = "returning"
     em = e.create_request("ВС-05", "x", "Планер", priority="emergency")
     assert em["status"] == "enroute" and em["violation"] is True
 
@@ -155,6 +200,42 @@ def test_auto_qual_error_message():
         e.create_request("ВС-01", "что-то странное", "auto"); assert False
     except ValueError as ex:
         assert "вручную" in str(ex)
+
+
+def test_simulation_pause_and_resume():
+    e = make()
+    r = e.create_request("ВС-03", "x", "Планер")
+    tech = e.techs[r["tech_id"]]
+    vehicle = e.engineer_vehicles.get(tech.vehicle_id)
+    e.set_running(False)
+    start = (e.sim_time, tech.x, tech.y, tech.travelled)
+    vehicle_start = (vehicle.x, vehicle.y) if vehicle else None
+    run(e, 12)
+    assert (e.sim_time, tech.x, tech.y, tech.travelled) == start
+    e.set_running(True)
+    run(e, 40)
+    moved = tech.travelled > start[3] or (vehicle and (vehicle.x, vehicle.y) != vehicle_start)
+    assert e.sim_time > start[0] and moved
+
+
+def test_simulator_can_move_and_reclassify_free_technicians():
+    e = make()
+    tech = e.techs[1]
+    node = next(node for node in e.graph.nodes if node != tech.node)
+    x, y = e.graph.nodes[node]
+    e.move_tech(tech.id, x, y)
+    assert tech.node == node and (tech.x, tech.y) == (x, y)
+    e.update_tech_profile(tech.id, "Авионика", ["A320", "B737"])
+    assert tech.qual == "Авионика" and tech.types == ("A320", "B737")
+
+
+def test_recommendation_computes_within_ten_seconds():
+    e = make()
+    start = time.perf_counter()
+    r = e.create_request("ВС-04", "Вибрация двигателя", "Двигатель")
+    elapsed = time.perf_counter() - start
+    assert r["status"] == "enroute"
+    assert elapsed < 10, f"Подбор занял {elapsed:.3f} секунд"
 
 
 if __name__ == "__main__":
