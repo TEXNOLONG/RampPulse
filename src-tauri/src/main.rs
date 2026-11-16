@@ -9,14 +9,21 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
 use tauri::{utils::config::Color, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 struct Backend(Mutex<Option<Child>>);
-struct ServiceRuntime { port: u16, data_dir: PathBuf, remote_base: Option<String> }
+struct ServiceRuntime {
+    port: u16,
+    data_dir: PathBuf,
+    remote_base: Option<String>,
+}
 struct DesktopLaunchState(AtomicBool);
 struct AirportFile(PathBuf);
 struct ChatDatabase(PathBuf);
@@ -436,19 +443,23 @@ fn project_root(app: &tauri::App) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        if root.join("run.py").is_file() {
+        if root.join("data/airport_sheremetyevo.json").is_file()
+            && root.join("frontend/index.html").is_file()
+        {
             return Ok(root.canonicalize().unwrap_or(root));
         }
     }
 
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
-    for candidate in [resources.clone(), resources.join("airport-crm")] {
-        if candidate.join("run.py").is_file() {
+    for candidate in [resources.clone(), resources.join("ramppulse")] {
+        if candidate.join("data/airport_sheremetyevo.json").is_file()
+            && candidate.join("frontend/index.html").is_file()
+        {
             return Ok(candidate);
         }
     }
     Err(format!(
-        "Backend files are missing from {}",
+        "RampPulse resources are missing from {}",
         resources.display()
     ))
 }
@@ -466,7 +477,10 @@ fn free_port(preferred: Option<u16>) -> Result<u16, String> {
 }
 
 fn configured_server_url() -> Option<String> {
-    let url = option_env!("RAMPULSE_SERVER_URL")?.trim().trim_end_matches('/').to_string();
+    let url = option_env!("RAMPULSE_SERVER_URL")?
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     if url.starts_with("https://") && url.len() > "https://".len() {
         Some(url)
     } else {
@@ -475,44 +489,56 @@ fn configured_server_url() -> Option<String> {
 }
 
 fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String> {
-    let venv_python = if cfg!(windows) {
-        root.join(".venv").join("Scripts").join("python.exe")
+    let binary_name = if cfg!(windows) {
+        "ramppulse-server.exe"
     } else {
-        root.join(".venv").join("bin").join("python")
+        "ramppulse-server"
     };
-    let python = if venv_python.is_file() {
-        venv_python
-    } else {
-        PathBuf::from(if cfg!(windows) { "python" } else { "python3" })
-    };
+    let binary = [
+        root.join("server").join(binary_name),
+        root.join("src-tauri/resources/server").join(binary_name),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| format!("В сборку RampPulse не вложен Rust-сервис ({binary_name})"))?;
     let airport_file = root.join("data").join("airport_sheremetyevo.json");
-    let bundled_server = root.join("server").join(if cfg!(windows) {
-        "airport-crm-server.exe"
-    } else {
-        "airport-crm-server"
-    });
-    let mut command = if bundled_server.is_file() {
-        Command::new(bundled_server)
-    } else {
-        let mut fallback = Command::new(python);
-        fallback.arg(root.join("run.py"));
-        fallback
-    };
+    let frontend_dir = root.join("frontend");
+    let attachments_dir = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("chat-attachments");
+    let service_log = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("service.log");
+    std::fs::create_dir_all(&attachments_dir)
+        .map_err(|e| format!("Не удалось подготовить хранилище чата: {e}"))?;
+    let log_file = fs::File::create(&service_log).map_err(|e| {
+        format!(
+            "Не удалось открыть журнал сервиса {}: {e}",
+            service_log.display()
+        )
+    })?;
+    let mut command = Command::new(binary);
     let child = command
-        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
         .current_dir(root)
+        .env("HOST", "127.0.0.1")
+        .env("PORT", port.to_string())
         .env("AIRPORT_FILE", airport_file)
+        .env("FRONTEND_DIR", frontend_dir)
         .env("DB_FILE", db_path)
+        .env("CHAT_STORAGE_DIR", attachments_dir)
         .env("DEMO_MODE", "1")
+        .env("COOKIE_SECURE", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(log_file))
         .spawn()
-        .map_err(|e| format!("Could not start the CRM service: {e}"))?;
+        .map_err(|e| format!("Не удалось запустить Rust-сервис RampPulse: {e}"))?;
     Ok(child)
 }
 
-fn wait_for_backend(port: u16) -> Result<(), String> {
+fn wait_for_backend(port: u16, data_dir: &Path) -> Result<(), String> {
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -521,12 +547,35 @@ fn wait_for_backend(port: u16) -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("Сервис CRM не ответил за 30 секунд. Перезапустите приложение; подробности доступны в журнале приложения.".into())
+    let service_log = data_dir.join("service.log");
+    let detail = fs::read_to_string(&service_log).ok().and_then(|contents| {
+        contents
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+    });
+    let message = match detail {
+        Some(detail) => format!(
+            "Сервис не запустился: {detail}. Журнал: {}",
+            service_log.display()
+        ),
+        None => format!(
+            "Сервис не ответил за 30 секунд. Журнал: {}",
+            service_log.display()
+        ),
+    };
+    Err(message)
 }
 
 #[tauri::command]
 fn consume_desktop_startup(state: State<'_, DesktopLaunchState>) -> bool {
     state.0.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn realtime_protocol_version() -> u16 {
+    ramppulse_core::REALTIME_PROTOCOL_VERSION
 }
 
 fn main() {
@@ -550,6 +599,7 @@ fn main() {
             get_preferences,
             set_startup_view,
             consume_desktop_startup,
+            realtime_protocol_version,
             load_airport_data,
             chat_initialize,
             chat_create_dm,
@@ -585,11 +635,21 @@ fn main() {
                 port
             };
             app.manage(Backend(Mutex::new(None)));
-            app.manage(ServiceRuntime { port, data_dir: data_dir.clone(), remote_base: remote_base.clone() });
+            app.manage(ServiceRuntime {
+                port,
+                data_dir: data_dir.clone(),
+                remote_base: remote_base.clone(),
+            });
             app.manage(DesktopLaunchState(AtomicBool::new(true)));
-            let profile = data_dir.join("webview-profiles").join(format!("main-{}", std::process::id()));
+            let profile = data_dir
+                .join("webview-profiles")
+                .join(format!("main-{}", std::process::id()));
             std::fs::create_dir_all(&profile)?;
-            let splash_config = app.config().app.windows.iter()
+            let splash_config = app
+                .config()
+                .app
+                .windows
+                .iter()
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Окно запуска не задано в tauri.conf.json"))?;
             let window = WebviewWindowBuilder::from_config(app, splash_config)
@@ -599,7 +659,9 @@ fn main() {
 
             if let Some(remote_base) = remote_base {
                 let url = format!("{remote_base}/login");
-                let url = url.parse().map_err(|e| std::io::Error::other(format!("Некорректный URL сервера: {e}")))?;
+                let url = url
+                    .parse()
+                    .map_err(|e| std::io::Error::other(format!("Некорректный URL сервера: {e}")))?;
                 window.navigate(url).map_err(std::io::Error::other)?;
                 let _ = window.set_resizable(true);
                 let _ = window.set_fullscreen(true);
@@ -608,7 +670,9 @@ fn main() {
 
             let app_handle = app.handle().clone();
             thread::spawn(move || {
-                if app_handle.webview_windows().is_empty() { return; }
+                if app_handle.webview_windows().is_empty() {
+                    return;
+                }
                 let _ = app_handle.emit("service-status", json!({"stage": 1}));
                 let child = match spawn_backend(&root, &db_path, port) {
                     Ok(child) => child,
@@ -618,7 +682,9 @@ fn main() {
                     }
                 };
                 let _ = app_handle.emit("service-status", json!({"stage": 2}));
-                if let Err(error) = wait_for_backend(port) {
+                if let Err(error) =
+                    wait_for_backend(port, db_path.parent().unwrap_or_else(|| Path::new(".")))
+                {
                     let mut child = child;
                     let _ = child.kill();
                     let _ = child.wait();
@@ -632,12 +698,16 @@ fn main() {
                     return;
                 }
                 if let Some(backend) = app_handle.try_state::<Backend>() {
-                    if let Ok(mut stored) = backend.0.lock() { *stored = Some(child); }
+                    if let Ok(mut stored) = backend.0.lock() {
+                        *stored = Some(child);
+                    }
                 }
                 let _ = app_handle.emit("service-status", json!({"stage": 3}));
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let url = format!("http://127.0.0.1:{port}/");
-                    if let Ok(url) = url.parse() { let _ = window.navigate(url); }
+                    if let Ok(url) = url.parse() {
+                        let _ = window.navigate(url);
+                    }
                     let _ = window.set_resizable(true);
                     let _ = window.set_fullscreen(true);
                 }
@@ -647,9 +717,14 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 // Keep the shared service alive while another role window is open.
-                let has_other_window = window.app_handle().webview_windows()
-                    .keys().any(|label| label != window.label());
-                if has_other_window { return; }
+                let has_other_window = window
+                    .app_handle()
+                    .webview_windows()
+                    .keys()
+                    .any(|label| label != window.label());
+                if has_other_window {
+                    return;
+                }
                 if let Some(backend) = window.app_handle().try_state::<Backend>() {
                     if let Ok(mut child) = backend.0.lock() {
                         if let Some(mut child) = child.take() {
@@ -665,9 +740,14 @@ fn main() {
 }
 
 #[tauri::command]
-fn open_secondary_session(app: tauri::AppHandle, runtime: State<'_, ServiceRuntime>) -> Result<(), String> {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?.as_millis();
+fn open_secondary_session(
+    app: tauri::AppHandle,
+    runtime: State<'_, ServiceRuntime>,
+) -> Result<(), String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
     let label = format!("session-{stamp}");
     let profile = runtime.data_dir.join("webview-profiles").join(&label);
     fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
@@ -676,16 +756,23 @@ fn open_secondary_session(app: tauri::AppHandle, runtime: State<'_, ServiceRunti
     } else {
         format!("http://127.0.0.1:{}/login", runtime.port)
     };
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url.parse().map_err(|e| format!("Invalid service URL: {e}"))?))
-        .title("RampPulse · Новая сессия")
-        .inner_size(1240.0, 820.0)
-        .min_inner_size(1000.0, 680.0)
-        .decorations(false)
-        .background_color(Color(10, 14, 23, 255))
-        .resizable(true)
-        .maximized(true)
-        .data_directory(profile)
-        .build()
-        .map(|_| ())
-        .map_err(|e| format!("Не удалось открыть новую сессию: {e}"))
+    WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::External(
+            url.parse()
+                .map_err(|e| format!("Invalid service URL: {e}"))?,
+        ),
+    )
+    .title("RampPulse · Новая сессия")
+    .inner_size(1240.0, 820.0)
+    .min_inner_size(1000.0, 680.0)
+    .decorations(false)
+    .background_color(Color(10, 14, 23, 255))
+    .resizable(true)
+    .maximized(true)
+    .data_directory(profile)
+    .build()
+    .map(|_| ())
+    .map_err(|e| format!("Не удалось открыть новую сессию: {e}"))
 }

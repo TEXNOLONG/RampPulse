@@ -1,6 +1,6 @@
 pkgname=ramppulse
-pkgver=0.2.0
-pkgrel=3
+pkgver=0.3.5
+pkgrel=1
 pkgdesc='RampPulse · Операционный центр для аэропортовых служб'
 arch=('x86_64')
 license=('custom')
@@ -13,10 +13,9 @@ source=()
 sha256sums=()
 
 package() {
-  local bundle="$startdir/../src-tauri/target/release/bundle/deb/RampPulse_0.2.0_amd64/data.tar.gz"
+  local bundle="$startdir/../src-tauri/target/release/bundle/deb/RampPulse_0.3.5_amd64/data.tar.gz"
   [[ -f "$bundle" ]] || { echo "Build the Tauri deb first: $bundle" >&2; return 1; }
   tar --no-same-owner -xzf "$bundle" --directory="$pkgdir"
-  ln -s airport-crm "$pkgdir/usr/bin/ramppulse"
   sed -i 's/^Exec=airport-crm$/Exec=ramppulse/; s/^Icon=airport-crm$/Icon=ramppulse/' "$pkgdir/usr/share/applications/RampPulse.desktop"
   for icon_size in 32x32 128x128 256x256@2; do
     local icon_dir="$pkgdir/usr/share/icons/hicolor/$icon_size/apps"

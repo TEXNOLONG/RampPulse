@@ -8,6 +8,9 @@ raw_*.json
 node_modules/
 .desktop-build/
 src-tauri/target/
+target/
+rust-server/target/
+src-tauri/resources/server/ramppulse-server*
 src-tauri/resources/server/airport-crm-server*
 desktop/pkg/
 desktop/__pycache__/

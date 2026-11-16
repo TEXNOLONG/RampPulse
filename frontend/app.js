@@ -1,5 +1,6 @@
 /* Аэрофлот · Диспетчер RampPulse */
 const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const errorText = error => {
   if (error instanceof Error && error.message) return error.message;
@@ -89,6 +90,86 @@ function toast(text, bad) {
   clearTimeout(toast.h);
   toast.h = setTimeout(() => (t.hidden = true), 3500);
 }
+async function reloadOperationSnapshot() {
+  try { S = await window.otoBridge.get('/api/state'); render(); }
+  catch (error) { console.error('Не удалось обновить состояние смены', error); }
+}
+function handleOperationEvent(packet) {
+  const kind = packet?.kind;
+  if (!kind) return false;
+  if (kind === 'heartbeat_ack') return true;
+  if (kind === 'chat_message_created') {
+    const message = packet.payload || {};
+    window.otoChat?.handleRealtime({type:'chat-message',room_kind:message.room_kind,payload:{...message,from_user_id:message.sender_id}});
+    return true;
+  }
+  if (kind === 'chat_message_read') {
+    window.otoChat?.handleRealtime({type:'chat-read',payload:packet.payload || {}});
+    return true;
+  }
+  if (kind.startsWith('call_')) {
+    window.otoChat?.handleRealtime({type:'call-signal',payload:{...(packet.payload || {}),kind:packet.payload?.kind || ({call_invited:'ring',call_accepted:'answer',call_rejected:'decline',call_ended:'hangup'}[kind] || 'signal')}});
+    return true;
+  }
+  if (kind === 'state_delta' && packet.entity?.kind === 'simulation' && S) {
+    const previousSimTime = Number(S.sim_time || 0);
+    const {aircraft: aircraftDeltas = [], techs: techDeltas = [], ...simulation} = packet.payload || {};
+    Object.assign(S, simulation);
+    const currentTechs = new Map((S.techs || []).map(tech => [Number(tech.id), tech]));
+    const authoritativeEta = new Map();
+    for (const delta of techDeltas) {
+      const tech = currentTechs.get(Number(delta.id));
+      if (tech) Object.assign(tech, delta);
+      if (delta.request_id != null) authoritativeEta.set(Number(delta.request_id), delta.eta_left);
+    }
+    const simStep = Math.max(0, Number(S.sim_time || 0) - previousSimTime);
+    if (simStep > 0) {
+      for (const request of (S.active || [])) {
+        if (request.status === 'waiting' || request.status === 'enroute' || request.status === 'assigned') {
+          request.elapsed = Number(request.elapsed || 0) + simStep;
+          if (request.status !== 'waiting' && request.eta_left != null && !authoritativeEta.has(Number(request.id))) request.eta_left = Math.max(0, Number(request.eta_left) - simStep);
+        }
+        if (authoritativeEta.has(Number(request.id))) request.eta_left = authoritativeEta.get(Number(request.id));
+      }
+      const deltas = new Map(aircraftDeltas.map(aircraft => [Number(aircraft.id), aircraft]));
+      for (const aircraft of (S.aircraft || [])) {
+        const delta = deltas.get(Number(aircraft.id));
+        if (!delta) continue;
+        aircraft.turnaround_progress = delta.turnaround_progress;
+        aircraft.services_progress = delta.services_progress;
+        if (aircraft.status !== delta.status) {
+          aircraft.status = delta.status;
+          aircraft.status_ru = delta.status_ru;
+          render();
+          break;
+        }
+      }
+      if (techDeltas.length) updateTechPositions(techDeltas);
+      renderLive();
+    }
+    const speed = $('#speed');
+    if (speed && document.activeElement !== speed) speed.value = String(S.sim_speed);
+    const toggle = $('#simToggle');
+    if (toggle) {
+      const running = S.sim_running !== false;
+      document.body.classList.toggle('simulation-paused', !running);
+      toggle.classList.toggle('paused', !running);
+      toggle.setAttribute('aria-pressed', String(running));
+      toggle.setAttribute('aria-label', running ? 'Приостановить симуляцию' : 'Запустить симуляцию');
+      const label = $('#simToggleText'); if (label) label.textContent = running ? 'Пауза' : 'Запустить';
+    }
+    return true;
+  }
+  if (kind === 'connection_ready') { void reloadOperationSnapshot(); return true; }
+  if (kind === 'resync_required' || kind === 'state_snapshot' || kind === 'state_delta' ||
+      kind.startsWith('request_') || kind.startsWith('registration_') || kind.startsWith('aircraft_') ||
+      kind === 'route_blocked' || kind === 'route_cleared' || kind === 'shift_started' || kind === 'shift_ended' ||
+      kind === 'presence_changed') {
+    void reloadOperationSnapshot();
+    return true;
+  }
+  return true;
+}
 function connect() {
   try {
     ws = window.otoBridge.socket('/ws');
@@ -97,7 +178,7 @@ function connect() {
       const mapLive = $('#mapLive'); if (mapLive) mapLive.classList.remove('offline');
       const mapLiveText = $('#mapLiveText'); if (mapLiveText) mapLiveText.textContent = 'LIVE';
     };
-    ws.onmessage = ev => { try { const packet = JSON.parse(ev.data); if (packet?.type && window.otoChat) window.otoChat.handleRealtime(packet); else { S = packet; render(); } } catch (e) { console.error(e); } };
+    ws.onmessage = ev => { try { const packet = JSON.parse(ev.data); if (packet?.protocol && handleOperationEvent(packet)) return; if (packet?.type && window.otoChat) window.otoChat.handleRealtime(packet); else { S = packet; render(); } } catch (e) { console.error(e); } };
     ws.onclose = ev => {
       const c = $('#conn'); if (c) c.className = 'conn off';
       const mapLive = $('#mapLive'); if (mapLive) mapLive.classList.add('offline');
@@ -659,7 +740,7 @@ function renderMap() {
     seenTechs.add(t.id);
     const g = mapEl.techs[t.id] || techEl(t);
     setMapPosition(`tech:${t.id}`, g, t.x, t.y);
-    g.setAttribute('class', 'tech ' + t.status + (!t.on_shift ? ' off-shift' : '') + (t.vehicle_id ? ' in-vehicle' : '') + (selTech === t.id ? ' sel' : ''));
+    g.setAttribute('class', 'tech ' + t.status + (!t.on_shift ? ' off-shift' : '') + (t.vehicle_id ? ' in-vehicle' : '') + (t.route_available === false ? ' route-unavailable' : '') + (selTech === t.id ? ' sel' : ''));
   });
   for (const id in mapEl.techs) {
     if (!seenTechs.has(+id)) { mapEl.techs[id].remove(); delete mapEl.techs[id]; mapMotion.delete(`tech:${id}`); }
@@ -748,6 +829,24 @@ function renderMap() {
       + (parked[id] ? ' has-plane' : '');
     mapEl.stands[id].setAttribute('class', cls);
   }
+}
+function updateTechPositions(deltas) {
+  const techs = new Map((S.techs || []).map(tech => [Number(tech.id), tech]));
+  for (const delta of deltas) {
+    const tech = techs.get(Number(delta.id));
+    const marker = tech && mapEl.techs[tech.id];
+    if (marker) {
+      setMapPosition(`tech:${tech.id}`, marker, tech.x, tech.y);
+      marker.classList.toggle('route-unavailable', tech.route_available === false);
+      const title = marker.querySelector('title');
+      if (title && tech.route_available === false) title.textContent = `${tech.name}, маршрут перекрыт`;
+      else if (title) title.textContent = `${tech.name}, ${tech.qual}, ${tech.speed} м/с`;
+    }
+  }
+  if (typeof Map3D !== 'undefined' && Map3D.isActive?.()) Map3D.update(S, {
+    tech: selTech, aircraft: selAircraft, vehicle: selVehicle,
+    stand: selReq ? (S.active.find(request => request.id === selReq)?.stand || null) : null,
+  });
 }
 
 /* ---------- списки ---------- */

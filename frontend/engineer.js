@@ -62,6 +62,72 @@ function setConnection(on) {
   el.querySelector('span').textContent = on ? 'Онлайн' : 'Нет связи';
 }
 
+function handleOperationEvent(packet) {
+  const kind = packet?.kind;
+  if (!kind) return false;
+  if (kind === 'heartbeat_ack') return true;
+  if (kind === 'chat_message_created') {
+    const message = packet.payload || {};
+    window.otoChat?.handleRealtime({type:'chat-message',room_kind:message.room_kind,payload:{...message,from_user_id:message.sender_id}});
+    return true;
+  }
+  if (kind === 'chat_message_read') {
+    window.otoChat?.handleRealtime({type:'chat-read',payload:packet.payload || {}});
+    return true;
+  }
+  if (kind.startsWith('call_')) {
+    window.otoChat?.handleRealtime({type:'call-signal',payload:{...(packet.payload || {}),kind:packet.payload?.kind || ({call_invited:'ring',call_accepted:'answer',call_rejected:'decline',call_ended:'hangup'}[kind] || 'signal')}});
+    return true;
+  }
+  if (kind === 'state_delta' && packet.entity?.kind === 'simulation' && S) {
+    const previousSimTime = Number(S.sim_time || 0);
+    const {aircraft: aircraftDeltas = [], techs: techDeltas = [], ...simulation} = packet.payload || {};
+    Object.assign(S, simulation);
+    const ownTechDelta = techDeltas.find(tech => Number(tech.id) === Number(S.me?.id));
+    if (ownTechDelta && S.me) {
+      const routeWasAvailable = S.me.route_available !== false;
+      Object.assign(S.me, ownTechDelta);
+      if (routeWasAvailable && ownTechDelta.route_available === false) toast('Маршрут перекрыт. Диспетчер перестраивает путь.', true);
+      const activeRequest = (S.active || []).find(request => Number(request.id) === Number(ownTechDelta.request_id));
+      if (activeRequest) activeRequest.eta_left = ownTechDelta.eta_left;
+      updateEngineerMapPosition();
+    }
+    const simStep = Math.max(0, Number(S.sim_time || 0) - previousSimTime);
+    if (simStep > 0) {
+      const deltas = new Map(aircraftDeltas.map(aircraft => [Number(aircraft.id), aircraft]));
+      for (const aircraft of (S.aircraft || [])) {
+        const delta = deltas.get(Number(aircraft.id));
+        if (!delta) continue;
+        aircraft.turnaround_progress = delta.turnaround_progress;
+        aircraft.services_progress = delta.services_progress;
+        if (aircraft.status !== delta.status) {
+          aircraft.status = delta.status;
+          aircraft.status_ru = delta.status_ru;
+        }
+      }
+      for (const request of (S.active || [])) {
+        if (request.status === 'waiting' || request.status === 'enroute' || request.status === 'assigned') {
+          request.elapsed = Number(request.elapsed || 0) + simStep;
+          if (request.status !== 'waiting' && request.eta_left != null &&
+              !(ownTechDelta && Number(request.id) === Number(ownTechDelta.request_id))) {
+            request.eta_left = Math.max(0, Number(request.eta_left) - simStep);
+          }
+        }
+      }
+      renderLiveTasks();
+    }
+    return true;
+  }
+  if (kind === 'connection_ready' || kind === 'resync_required' || kind === 'state_snapshot' ||
+      kind === 'state_delta' || kind.startsWith('request_') || kind.startsWith('registration_') ||
+      kind === 'shift_started' || kind === 'shift_ended' || kind === 'presence_changed' ||
+      kind === 'route_blocked' || kind === 'route_cleared') {
+    void loadState();
+    return true;
+  }
+  return true;
+}
+
 function connect() {
   clearTimeout(reconnectTimer);
   if (!shouldReconnect) return;
@@ -71,6 +137,7 @@ function connect() {
     ws.onmessage = event => {
       try {
         const packet = JSON.parse(event.data);
+        if (packet?.protocol && handleOperationEvent(packet)) return;
         if (packet?.type && window.otoChat) window.otoChat.handleRealtime(packet);
         else { S = packet; render(); }
       } catch (e) {
@@ -167,14 +234,14 @@ function taskCard(r) {
     <div class="eng-task-facts">
       <div><span>Рейс</span><b>${esc(flight)}</b></div>
       <div><span>Квалификация</span><b>${esc(r.qual)}</b></div>
-      <div><span>${left}</span><b>${eta || (r.status === 'working' ? fmt(elapsed) : '—')}</b></div>
+      <div><span>${left}</span><b data-live="task-eta" data-id="${r.id}">${eta || (r.status === 'working' ? fmt(elapsed) : '—')}</b></div>
     </div>
     ${r.note ? `<p class="eng-task-note">${esc(r.note)}</p>` : ''}
     <div class="eng-progress" title="Время с момента вызова">
-      <i class="${barCls}" style="width:${progress}%"></i>
+      <i data-live="task-progress" data-id="${r.id}" class="${barCls}" style="width:${progress}%"></i>
     </div>
     <div class="eng-task-foot">
-      <span class="eng-elapsed">С момента вызова: <b>${fmt(elapsed)}</b></span>
+      <span class="eng-elapsed">С момента вызова: <b data-live="task-elapsed" data-id="${r.id}">${fmt(elapsed)}</b></span>
       ${action ? `<button class="primary eng-action" data-eng-act="${action[0]}" data-id="${r.id}"
         ${busy.has(`${r.id}:${action[0]}`) ? 'disabled' : ''}>
         ${busy.has(`${r.id}:${action[0]}`) ? 'Сохраняем…' : (action[0] === 'arrive' ? 'На месте' : action[0] === 'resolve' ? 'Завершено' : action[1])}</button>` : ''}
@@ -196,6 +263,24 @@ function renderTasks() {
         <div><b>Вы свободны</b>
         <p>Диспетчер назначит заявку автоматически — по квалификации, допуску на тип ВС и ближайшему маршруту.</p></div>
       </div>`;
+}
+
+function renderLiveTasks() {
+  const norm = Number(S.norm || 900);
+  for (const request of (S.active || [])) {
+    const id = Number(request.id);
+    const elapsed = Number(request.elapsed || 0);
+    const eta = request.status === 'enroute' ? fmt(request.eta_left) : request.status === 'working' ? fmt(elapsed) : '—';
+    const etaNode = $(`[data-live="task-eta"][data-id="${id}"]`);
+    const elapsedNode = $(`[data-live="task-elapsed"][data-id="${id}"]`);
+    const progressNode = $(`[data-live="task-progress"][data-id="${id}"]`);
+    if (etaNode) etaNode.textContent = eta;
+    if (elapsedNode) elapsedNode.textContent = fmt(elapsed);
+    if (progressNode) {
+      progressNode.style.width = `${Math.min(100, Math.max(0, elapsed / norm * 100))}%`;
+      progressNode.classList.toggle('over', elapsed > norm);
+    }
+  }
 }
 
 function renderHistory() {
@@ -326,8 +411,26 @@ function renderMap() {
     ${standHtml}
     ${vehicleHtml}
     <circle class="eng-me-ring" cx="${me.x}" cy="${me.y}" r="${meR * 2.2}"/>
-    <circle class="eng-me" cx="${me.x}" cy="${me.y}" r="${meR}" style="fill:${QCOL[me.qual] || 'var(--blue)'}"/>
-    <text class="eng-me-label" x="${me.x}" y="${me.y - meR * 2.9}" text-anchor="middle" font-size="${fs * 0.78}">Вы</text>`;
+    <circle class="eng-me${me.route_available === false ? ' route-unavailable' : ''}" cx="${me.x}" cy="${me.y}" r="${meR}" style="fill:${QCOL[me.qual] || 'var(--blue)'}"/>
+    <text class="eng-me-label" data-offset="${meR * 2.9}" x="${me.x}" y="${me.y - meR * 2.9}" text-anchor="middle" font-size="${fs * 0.78}">Вы</text>`;
+}
+
+function updateEngineerMapPosition() {
+  const svg = $('#engMap');
+  const me = S?.me;
+  if (!svg || !me) return;
+  svg.querySelector('.eng-me')?.setAttribute('cx', String(me.x));
+  svg.querySelector('.eng-me')?.setAttribute('cy', String(me.y));
+  svg.querySelector('.eng-me')?.classList.toggle('route-unavailable', me.route_available === false);
+  svg.querySelector('.eng-me-ring')?.setAttribute('cx', String(me.x));
+  svg.querySelector('.eng-me-ring')?.setAttribute('cy', String(me.y));
+  const label = svg.querySelector('.eng-me-label');
+  if (label) { label.setAttribute('x', String(me.x)); label.setAttribute('y', String(me.y - Number(label.dataset.offset || 20))); }
+  const routePoints = me.route?.length ? me.route.slice() : [];
+  if (routePoints.length) routePoints[0] = [me.x, me.y];
+  else routePoints.push([me.x, me.y]);
+  const route = routePoints.map(p => `${p[0]} ${p[1]}`).join(' ');
+  svg.querySelectorAll('.eng-route-casing, .eng-route-line').forEach(line => line.setAttribute('points', route));
 }
 
 function render() {

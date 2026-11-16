@@ -1,10 +1,10 @@
 {
-  "name": "airport-crm-desktop",
+  "name": "ramppulse-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.5",
   "scripts": {
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
+    "desktop:dev": "node desktop/build_server.js && tauri dev",
     "desktop:build": "node desktop/build_server.js && tauri build",
     "ui:build": "tsc -p tsconfig.desktop.json && tsc -p tsconfig.bridge.json"
   },

@@ -2,12 +2,46 @@ type JsonValue = Record<string, unknown>;
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 type Unlisten = () => void;
 
+interface RealtimeEvent {
+  protocol: number;
+  event_id: string;
+  sequence: number;
+  occurred_at_ms: number;
+  kind: string;
+  actor?: JsonValue | null;
+  entity?: JsonValue | null;
+  payload: JsonValue;
+}
+
+interface RealtimeSubscription {
+  close(): void;
+}
+
 interface OtoBridgeAPI {
   request<T = JsonValue>(path: string, init?: RequestInit): Promise<T>;
   get<T = JsonValue>(path: string): Promise<T>;
   post<T = JsonValue>(path: string, body?: unknown): Promise<T>;
   socket(path?: string): WebSocket;
   airport(): Promise<JsonValue>;
+  operations: {
+    listRequests(): Promise<{ requests: JsonValue[] }>;
+    createRequest(input: JsonValue): Promise<JsonValue>;
+    setRequestStatus(id: number, status: string): Promise<JsonValue>;
+    setShift(onShift: boolean): Promise<JsonValue>;
+    previewRoute(from: string, to: string, blockedEdges?: string[]): Promise<JsonValue>;
+    subscribe(handler: (event: RealtimeEvent) => void, onState?: (connected: boolean) => void): RealtimeSubscription;
+  };
+  messaging: {
+    available(): Promise<boolean>;
+    contacts(): Promise<{ contacts: JsonValue[] }>;
+    rooms(): Promise<{ rooms: JsonValue[] }>;
+    createDirect(peerId: number): Promise<JsonValue>;
+    messages(roomId: number, limit?: number): Promise<{ messages: JsonValue[] }>;
+    send(roomId: number, kind: 'text' | 'sticker', content: string): Promise<JsonValue>;
+    upload(roomId: number, kind: 'file' | 'voice', file: Blob, fileName: string, duration?: number): Promise<JsonValue>;
+    markRead(roomId: number, messageId: number): Promise<void>;
+    signalCall(recipientId: number, signal: JsonValue): Promise<JsonValue>;
+  };
   errorMessage(error: unknown): string;
   revealSplash(id: string, startedAt?: number, minimumMs?: number): Promise<void>;
   openSession(): Promise<void>;
@@ -57,7 +91,7 @@ async function bridgeRequest<T>(path: string, init: RequestInit = {}): Promise<T
     credentials: 'same-origin',
     cache: 'no-store',
     ...init,
-    headers: { ...(init.body ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) },
+    headers: { ...(typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) },
   });
   const contentType = response.headers.get('content-type') || '';
   const data: unknown = contentType.includes('application/json') ? await response.json().catch(() => ({})) : await response.text();
@@ -92,6 +126,87 @@ window.otoBridge = {
     return new WebSocket(`${protocol}//${location.host}${path}`);
   },
   airport: loadAirport,
+  operations: {
+    listRequests: () => bridgeRequest('/api/requests'),
+    createRequest: input => bridgeRequest('/api/requests', { method: 'POST', body: JSON.stringify(input) }),
+    setRequestStatus: (id, status) => bridgeRequest(`/api/requests/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+    setShift: onShift => bridgeRequest('/api/shift', { method: 'POST', body: JSON.stringify({ on_shift: onShift }) }),
+    previewRoute: (from, to, blockedEdges = []) => bridgeRequest('/api/routes/preview', {
+      method: 'POST', body: JSON.stringify({ from, to, blocked_edges: blockedEdges }),
+    }),
+    subscribe(handler, onState = () => {}) {
+      let closed = false;
+      let socket: WebSocket | null = null;
+      let reconnectTimer = 0;
+      let heartbeatTimer = 0;
+      let retryMs = 500;
+      let lastSequence = 0;
+      const connect = () => {
+        if (closed) return;
+        socket = window.otoBridge.socket('/ws');
+        socket.onopen = () => {
+          retryMs = 500;
+          onState(true);
+          heartbeatTimer = window.setInterval(() => {
+            if (socket?.readyState === WebSocket.OPEN) socket.send('heartbeat');
+          }, 25_000);
+        };
+        socket.onmessage = event => {
+          try {
+            const packet = JSON.parse(String(event.data)) as RealtimeEvent;
+            if (typeof packet?.kind !== 'string') return;
+            if (packet.kind !== 'connection_ready' && packet.kind !== 'heartbeat_ack' && packet.sequence <= lastSequence) return;
+            if (packet.sequence > 0) lastSequence = packet.sequence;
+            handler(packet);
+          } catch (error) {
+            console.error('RampPulse: некорректное realtime-событие', error);
+          }
+        };
+        socket.onclose = () => {
+          window.clearInterval(heartbeatTimer);
+          onState(false);
+          if (!closed) {
+            reconnectTimer = window.setTimeout(connect, retryMs);
+            retryMs = Math.min(15_000, retryMs * 2);
+          }
+        };
+        socket.onerror = () => socket?.close();
+      };
+      connect();
+      return {
+        close() {
+          closed = true;
+          window.clearTimeout(reconnectTimer);
+          window.clearInterval(heartbeatTimer);
+          socket?.close();
+          onState(false);
+        },
+      };
+    },
+  },
+  messaging: {
+    async available() {
+      const meta=await bridgeRequest<JsonValue>('/api/meta');
+      return Boolean((meta.features as Record<string,unknown> | undefined)?.server_chat);
+    },
+    contacts: () => bridgeRequest('/api/chat/contacts'),
+    rooms: () => bridgeRequest('/api/chat/rooms'),
+    createDirect: peerId => bridgeRequest('/api/chat/rooms/direct', { method: 'POST', body: JSON.stringify({ peer_id: peerId }) }),
+    messages: (roomId, limit = 50) => bridgeRequest(`/api/chat/rooms/${roomId}/messages?limit=${limit}`),
+    send: (roomId, kind, content) => bridgeRequest(`/api/chat/rooms/${roomId}/messages`, { method: 'POST', body: JSON.stringify({ kind, content }) }),
+    upload: (roomId, kind, file, fileName, duration) => bridgeRequest(`/api/chat/rooms/${roomId}/attachments`, {
+      method: 'POST', body: file, headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-Chat-Kind': kind,
+        'X-Chat-File-Name': encodeURIComponent(fileName),
+        ...(duration === undefined ? {} : { 'X-Chat-Duration': String(duration) }),
+      },
+    }),
+    markRead: async (roomId, messageId) => {
+      await bridgeRequest(`/api/chat/rooms/${roomId}/read`, { method: 'POST', body: JSON.stringify({ message_id: messageId }) });
+    },
+    signalCall: (recipientId, signal) => bridgeRequest('/api/calls/relay', { method: 'POST', body: JSON.stringify({ recipient_id: recipientId, signal }) }),
+  },
   errorMessage: bridgeErrorMessage,
   openSession: () => invokeDesktop<void>('open_secondary_session', {}),
   consumeDesktopStartup: () => invokeDesktop<boolean>('consume_desktop_startup', {}),

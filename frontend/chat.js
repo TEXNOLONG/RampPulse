@@ -7,8 +7,9 @@
     ['check','Проверка','<rect x="4" y="4" width="16" height="17" rx="2"/><path d="M8 9h8m-8 4h3m1 4 2 2 4-5"/>'],['radio','На связи','<path d="M5 20h14M7 17a7 7 0 0 1 10 0m-7-3a3 3 0 0 1 4 0M12 4v3"/><circle cx="12" cy="3" r="1"/>'],['fuel','Топливо','<path d="M5 21V4h10v17M4 21h12M8 8h4m5-1 3 3v7a2 2 0 0 0 4 0v-6l-3-3"/>'],['tow','Буксир','<path d="M3 16h13l2-5h3l2 5v3h-2M3 19h2m5 0h4M5 16V9h9v7M7 9V6h6v3"/>'],
     ['warning','Ограничение','<path d="M12 3 2.8 20h18.4zM12 9v5m0 3h.01"/>'],['medical','Медслужба','<rect x="4" y="5" width="16" height="15" rx="2"/><path d="M9 5V3h6v2m-3 4v7m-3.5-3.5h7"/>'],['done','Завершено','<circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/>'],['stand','Стоянка','<path d="M5 20V4h7a5 5 0 0 1 0 10H5m0-5h6"/>'],
   ];
-  let identity = null, rooms = [], contacts = [], selectedRoom = null, messages = [], unreadTotal = 0;
+  let identity = null, rooms = [], contacts = [], selectedRoom = null, messages = [], unreadTotal = 0, serverMode = false;
   let unlistenChat = null, unlistenCalls = null, audioContext = null, ringInterval = 0, callClock = 0, call = null;
+  let iceServersPromise = null;
   let roomLoadToken = 0;
   const knownMessages = new Set();
   const pendingMessages = new Set();
@@ -63,7 +64,7 @@
       return `<button type="button" class="chat-room" data-contact-id="${person.id}"><span class="chat-room-mark">${esc(person.name.trim().slice(0,1).toUpperCase())}</span><span class="chat-room-copy"><b>${esc(person.name)}${uname}</b><small>${person.on_shift ? 'На смене · личный чат' : 'Личный чат'}</small></span><i class="contact-led ${person.on_shift ? 'online' : ''}"></i></button>`;
     }).join('');
 
-    $('#chatRooms').innerHTML = `<div class="chat-search-wrap"><input type="search" id="chatSearchInput" class="chat-search-input" placeholder="🔍 Поиск (@юзернейм, имя)..." value="${esc(contactQuery)}"/></div><div class="chat-room-section-label">КАНАЛЫ И ДИАЛОГИ</div>${roomButtons}${contactButtons ? '<div class="chat-room-section-label contacts-label">СОТРУДНИКИ</div>' + contactButtons : ''}`;
+    $('#chatRooms').innerHTML = `<div class="chat-search-wrap"><input type="search" id="chatSearchInput" class="chat-search-input" placeholder="Поиск по имени или @логину" value="${esc(contactQuery)}"/></div><div class="chat-room-section-label">КАНАЛЫ И ДИАЛОГИ</div>${roomButtons}${contactButtons ? '<div class="chat-room-section-label contacts-label">СОТРУДНИКИ</div>' + contactButtons : ''}`;
 
     const searchInp = $('#chatSearchInput');
     if (searchInp) {
@@ -78,7 +79,7 @@
   function renderMessages() {
     const container = $('#chatMessages');
     if (!messages.length) {
-      container.innerHTML = `<div class="chat-empty"><span class="chat-empty-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/></svg></span><b>Начните разговор</b><p>Оперативные сообщения сохраняются на устройстве и приходят участникам канала сразу.</p></div>`;
+      container.innerHTML = `<div class="chat-empty"><span class="chat-empty-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/></svg></span><b>Начните разговор</b><p>Сообщения хранятся на сервере и синхронизируются между участниками.</p></div>`;
       return;
     }
     container.innerHTML = messages.map(message => {
@@ -87,23 +88,25 @@
       const sticker = message.sticker ? stickerHtml(message.sticker, true) : '';
       let mediaHtml = '';
       if (message.media_url) {
-        if (message.media_type === 'image') {
+        if (String(message.media_type || '').startsWith('image/')) {
           mediaHtml = `<div class="chat-media-wrap"><a href="${esc(message.media_url)}" target="_blank"><img src="${esc(message.media_url)}" class="chat-media-img" alt="${esc(message.media_name||'Фото')}"/></a></div>`;
-        } else if (message.media_type === 'audio_voice') {
-          mediaHtml = `<div class="chat-voice-wrap"><audio controls src="${esc(message.media_url)}" class="chat-voice-audio"></audio><span class="chat-voice-label">🎙 ${esc(message.media_name || 'Голосовое сообщение')}</span></div>`;
+        } else if (String(message.media_type || '').startsWith('audio/')) {
+          mediaHtml = `<div class="chat-voice-wrap"><audio controls src="${esc(message.media_url)}" class="chat-voice-audio"></audio><span class="chat-voice-label">${esc(message.media_name || 'Голосовое сообщение')}</span></div>`;
         } else {
-          mediaHtml = `<div class="chat-file-wrap"><a href="${esc(message.media_url)}" download="${esc(message.media_name||'файл')}" class="chat-file-link" target="_blank">📄 ${esc(message.media_name || 'Скачать файл')}</a></div>`;
+          mediaHtml = `<div class="chat-file-wrap"><a href="${esc(message.media_url)}" download="${esc(message.media_name||'файл')}" class="chat-file-link" target="_blank">${esc(message.media_name || 'Скачать файл')}</a></div>`;
         }
       }
       const key = keyFor(message);
-      const status = pendingMessages.has(key) ? '🕒' : failedMessages.has(key) ? '⚠️ Ошибка' : message.read ? '✓✓' : '✓';
+      const status = pendingMessages.has(key) ? 'Отправка' : failedMessages.has(key) ? 'Ошибка' : message.read ? '✓✓' : '✓';
       const retry = own && failedMessages.has(key) ? `<button class="chat-retry" type="button" data-retry-message="${esc(key)}">Повторить</button>` : '';
       return `<article class="chat-message ${own ? 'own' : ''} ${failedMessages.has(key) ? 'delivery-failed' : ''}" data-message-key="${esc(key)}"><div class="chat-message-top"><b>${own ? 'Вы' : esc(message.sender_name || 'Участник')}${unameTag}</b><time>${esc(timeLabel(message.created_at))}</time></div>${message.body ? `<p>${esc(message.body)}</p>` : ''}${sticker}${mediaHtml}<div class="chat-message-meta">${own ? status : 'Смена'}${retry}</div></article>`;
     }).join('');
     container.scrollTop = container.scrollHeight;
   }
   async function refreshRooms() {
-    rooms = await window.otoBridge.chat.initialize(Number(identity.id), identity.name);
+    rooms = serverMode
+      ? (await window.otoBridge.messaging.rooms()).rooms
+      : await window.otoBridge.chat.initialize(Number(identity.id), identity.name);
     unreadTotal = rooms.reduce((total, room) => total + Number(room.unread || 0), 0);
     if (!selectedRoom) selectedRoom = rooms.find(room => room.kind === 'shift') || rooms[0] || null;
     else selectedRoom = rooms.find(room => Number(room.id) === Number(selectedRoom.id)) || selectedRoom;
@@ -118,6 +121,24 @@
     $('#chatRoomName').textContent = room.kind === 'shift' ? room.name : room.peer_name || room.name;
     $('#chatRoomState').textContent = room.kind === 'shift' ? 'Сообщения команды · общий канал' : 'Личная связь · диспетчер ↔ инженер';
     $('#chatCall').disabled = room.kind !== 'direct' || !room.peer_id;
+    if (serverMode) {
+      try {
+        const archive = await window.otoBridge.messaging.messages(Number(room.id));
+        if (loadToken !== roomLoadToken) return;
+        messages = (archive.messages || []).map(message => ({...message, body:message.body || '', sticker:message.sticker || null}));
+        messages.forEach(message => knownMessages.add(keyFor(message)));
+        const latest = messages[messages.length - 1];
+        if (latest && Number(latest.sender_id) !== Number(identity.id)) {
+          await window.otoBridge.messaging.markRead(Number(room.id), Number(latest.id));
+        }
+        room.unread = 0;
+        selectedRoom.unread = 0;
+        renderRooms(); renderMessages(); updateUnread();
+      } catch (error) {
+        toastIncoming('Чат недоступен', window.otoBridge.errorMessage(error));
+      }
+      return;
+    }
     try {
       const archive = await window.otoBridge.chat.history(room.kind, room.kind === 'direct' ? Number(room.peer_id) : undefined);
       if (loadToken !== roomLoadToken) return;
@@ -146,7 +167,12 @@
   async function selectContact(id) {
     const person = contacts.find(item => Number(item.id) === Number(id));
     if (!person) return;
-    selectedRoom = await window.otoBridge.chat.createDirect(Number(identity.id), Number(person.id), identity.name, person.name);
+    if (serverMode) {
+      const response = await window.otoBridge.messaging.createDirect(Number(person.id));
+      selectedRoom = response.room;
+    } else {
+      selectedRoom = await window.otoBridge.chat.createDirect(Number(identity.id), Number(person.id), identity.name, person.name);
+    }
     await refreshRooms();
     $('#chatPanel').classList.add('open');
   }
@@ -185,6 +211,31 @@
     }
     if (kind === 'shift' && !open) toastIncoming(message.sender_name || 'Команда', 'Новое сообщение в канале смены');
   }
+  async function acceptServerMessage(message, kind) {
+    if (!message || Number(message.sender_id) === Number(identity?.id)) return;
+    const roomId = Number(message.room_id);
+    const key = keyFor(message);
+    if (knownMessages.has(key)) return;
+    knownMessages.add(key);
+    message = {...message, room_id:roomId, body:message.body || '', sticker:message.sticker || null};
+    const room = rooms.find(item => Number(item.id) === roomId);
+    if (!room) {
+      await refreshRooms();
+    }
+    const open = !$('#chatPanel').hidden && selectedRoom && Number(selectedRoom.id) === roomId;
+    if (open) {
+      if (!messages.some(item => keyFor(item) === key)) messages.push(message);
+      renderMessages();
+      await window.otoBridge.messaging.markRead(roomId, Number(message.id));
+    } else {
+      unreadTotal += 1;
+      updateUnread();
+      const target = rooms.find(item => Number(item.id) === roomId);
+      if (target) target.unread = Number(target.unread || 0) + 1;
+      renderRooms();
+      if (kind === 'shift' || target?.kind === 'shift') toastIncoming(message.sender_name || 'Команда', 'Новое сообщение в канале смены');
+    }
+  }
   function toastIncoming(title, text) {
     const node = $('#chatNotice');
     if (!node) return;
@@ -207,6 +258,21 @@
       return;
     }
     if (!body.trim() && !sticker && !media) return;
+    if (serverMode) {
+      const result = media
+        ? await window.otoBridge.messaging.upload(Number(selectedRoom.id), media.kind || 'file', media.file, media.name || 'Вложение', media.duration)
+        : await window.otoBridge.messaging.send(Number(selectedRoom.id), sticker ? 'sticker' : 'text', sticker || body.trim());
+      const message = result.message || result;
+      if (!messages.some(item => keyFor(item) === keyFor(message))) messages.push(message);
+      knownMessages.add(keyFor(message));
+      renderMessages();
+      if (!sticker && $('#chatInput').value === body) {
+        $('#chatInput').value = '';
+        $('#chatInput').style.height = '';
+      }
+      $('#stickerPicker').hidden = true;
+      return;
+    }
     const targetRoom = {...selectedRoom};
     const relayKey = crypto.randomUUID ? crypto.randomUUID() : `${identity.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const args = {
@@ -290,9 +356,22 @@
     play(); ringInterval = window.setInterval(play, 1250);
   }
   function ringStop() { clearInterval(ringInterval); ringInterval = 0; }
+  function getIceServers() {
+    if (!iceServersPromise) {
+      iceServersPromise = window.otoBridge.get('/api/calls/config')
+        .then(config => Array.isArray(config?.ice_servers) && config.ice_servers.length
+          ? config.ice_servers
+          : [{urls:'stun:stun.l.google.com:19302'}])
+        .catch(() => [{urls:'stun:stun.l.google.com:19302'}]);
+    }
+    return iceServersPromise;
+  }
   function callSignal(kind, extra = {}) {
     if (!call) return Promise.resolve();
-    return window.otoBridge.chat.signal({kind, call_id:call.id, ...extra}, Number(call.peerId));
+    const signal = {kind, call_id:call.id, ...extra};
+    return serverMode
+      ? window.otoBridge.messaging.signalCall(Number(call.peerId), signal)
+      : window.otoBridge.chat.signal(signal, Number(call.peerId));
   }
   function showCall(mode) {
     const dialog = $('#callDialog');
@@ -317,10 +396,10 @@
   }
   async function preparePeer() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('Доступ к микрофону заблокирован браузером по незащищённому HTTP. Откройте приложение через RampPulse.exe (где микрофон работает напрямую через ОС) либо настройте HTTPS.');
+      throw new Error('Доступ к микрофону требует защищённого источника. Откройте RampPulse для компьютера или подключите сервер по HTTPS.');
     }
     call.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
-    call.pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    call.pc = new RTCPeerConnection({iceServers:await getIceServers(),iceCandidatePoolSize:2});
     call.stream.getTracks().forEach(track => call.pc.addTrack(track, call.stream));
     call.pc.onicecandidate = event => { if (event.candidate) void callSignal('ice', {candidate:event.candidate.toJSON()}); };
     call.pc.ontrack = event => { const audio = $('#remoteAudio'); audio.srcObject = event.streams[0]; void audio.play().catch(() => {}); };
@@ -364,7 +443,7 @@
     if (!data || data.from_user_id == null || Number(data.from_user_id) === Number(identity.id)) return;
     const kind = data.kind, id = String(data.call_id || '');
     if (kind === 'ring') {
-      if (call) { void window.otoBridge.chat.signal({kind:'busy',call_id:id}, Number(data.from_user_id)); return; }
+      if (call) { void (serverMode ? window.otoBridge.messaging.signalCall(Number(data.from_user_id), {kind:'busy',call_id:id}) : window.otoBridge.chat.signal({kind:'busy',call_id:id}, Number(data.from_user_id))); return; }
       call = {id,peerId:Number(data.from_user_id),peerName:data.from_name || 'Собеседник',incoming:true,ice:[]};
       $('#chatRoomState').textContent = `Входящий звонок · ${call.peerName}`;
       showCall('incoming'); ringStart(); call.timeout = window.setTimeout(() => { if (call?.incoming) { void endCall('hangup'); toastIncoming('Голосовая связь','Время ожидания истекло'); } }, 30000); return;
@@ -397,7 +476,11 @@
   async function endCall(kind = 'hangup') {
     if (!call) return;
     const peerId = Number(call.peerId), callId = call.id;
-    try { await window.otoBridge.chat.signal({kind,call_id:callId}, peerId); } catch (_) {}
+    try {
+      const signal = {kind,call_id:callId};
+      if (serverMode) await window.otoBridge.messaging.signalCall(peerId, signal);
+      else await window.otoBridge.chat.signal(signal, peerId);
+    } catch (_) {}
     cleanupCall();
   }
 
@@ -405,16 +488,21 @@
     try {
       const response = await window.otoBridge.get('/api/auth/me');
       identity = response.user;
+      serverMode = await window.otoBridge.messaging.available().catch(() => false);
       try {
         const persisted = JSON.parse(localStorage.getItem(`oto-chat-failed-${identity.id}`) || '[]');
         if (Array.isArray(persisted)) persisted.forEach(key => failedMessages.add(String(key)));
       } catch (_) {}
-      const contactData = await window.otoBridge.get('/api/chat/contacts');
+      const contactData = serverMode
+        ? await window.otoBridge.messaging.contacts()
+        : await window.otoBridge.get('/api/chat/contacts');
       contacts = contactData.contacts || [];
       renderStickerPicker();
       await refreshRooms();
-      unlistenChat = await window.otoBridge.chat.listen((message, kind, senderId) => acceptMessage(message, kind, senderId).catch(console.error));
-      unlistenCalls = await window.otoBridge.chat.listenCalls(handleCallSignal);
+      if (!serverMode) {
+        unlistenChat = await window.otoBridge.chat.listen((message, kind, senderId) => acceptMessage(message, kind, senderId).catch(console.error));
+        unlistenCalls = await window.otoBridge.chat.listenCalls(handleCallSignal);
+      }
     } catch (error) { toastIncoming('Чат не подключён', window.otoBridge.errorMessage(error)); }
 
     $('#chatToggle').addEventListener('click', async () => {
@@ -455,12 +543,15 @@
         const file = event.target.files?.[0];
         if (!file) return;
         try {
-          const form = new FormData();
-          form.append('file', file);
-          const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
-          if (!res.ok) throw new Error('Ошибка загрузки файла');
-          const data = await res.json();
-          await send('', null, { url: data.url, type: data.media_type, name: data.media_name });
+          if (serverMode) await send('', null, { file, kind: 'file', name: file.name });
+          else {
+            const form = new FormData();
+            form.append('file', file);
+            const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
+            if (!res.ok) throw new Error('Ошибка загрузки файла');
+            const data = await res.json();
+            await send('', null, { url: data.url, type: data.media_type, name: data.media_name });
+          }
           fileInput.value = '';
         } catch (err) {
           toastIncoming('Файл не отправлен', window.otoBridge.errorMessage(err));
@@ -475,7 +566,7 @@
     if (voiceBtn) {
       voiceBtn.addEventListener('click', async () => {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          alert('⚠️ Доступ к микрофону заблокирован браузером:\nБраузеры (Chrome/Edge/Firefox) отключают микрофон на незащищённых HTTP-сайтах.\n\nРешение:\n1. Запустите нативное приложение RampPulse.exe (в нём микрофон работает напрямую через Windows без ограничений браузера);\n2. Либо используйте защищённое HTTPS-соединение.');
+          alert('Доступ к микрофону недоступен. Откройте приложение RampPulse или используйте защищённое HTTPS-соединение.');
           return;
         }
         if (!mediaRecorder || mediaRecorder.state === 'inactive') {
@@ -490,12 +581,15 @@
               const blob = new Blob(voiceChunks, { type: 'audio/webm' });
               const duration = Math.max(1, Math.round((Date.now() - voiceStart) / 1000));
               try {
-                const form = new FormData();
-                form.append('file', blob, 'voice_note.webm');
-                const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
-                if (!res.ok) throw new Error('Ошибка загрузки ГС');
-                const data = await res.json();
-                await send('', null, { url: data.url, type: 'audio_voice', name: `Голосовое сообщение (${duration}с)`, duration });
+                if (serverMode) await send('', null, { file: blob, kind: 'voice', name: `Голосовое сообщение (${duration}с)`, duration });
+                else {
+                  const form = new FormData();
+                  form.append('file', blob, 'voice_note.webm');
+                  const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
+                  if (!res.ok) throw new Error('Ошибка загрузки ГС');
+                  const data = await res.json();
+                  await send('', null, { url: data.url, type: 'audio_voice', name: `Голосовое сообщение (${duration}с)`, duration });
+                }
               } catch (err) {
                 toastIncoming('ГС не отправлено', window.otoBridge.errorMessage(err));
               }
@@ -525,8 +619,19 @@
   }
   window.otoChat = {
     handleRealtime(packet) {
-      if (packet?.type === 'chat-message') acceptMessage(packet.payload, packet.room_kind, packet.payload?.from_user_id).catch(console.error);
+      if (packet?.type === 'chat-message') {
+        if (serverMode) acceptServerMessage(packet.payload, packet.room_kind).catch(console.error);
+        else acceptMessage(packet.payload, packet.room_kind, packet.payload?.from_user_id).catch(console.error);
+      }
       else if (packet?.type === 'chat-read') {
+        if (serverMode) {
+          const {room_id: roomId, message_id: messageId} = packet.payload || {};
+          if (Number(selectedRoom?.id) === Number(roomId)) {
+            messages.forEach(message => { if (Number(message.sender_id) === Number(identity?.id) && Number(message.id) <= Number(messageId)) message.read = true; });
+            renderMessages();
+          }
+          return;
+        }
         const key = String(packet.payload?.relay_key || '');
         window.otoBridge.chat.markSentRead(key, Number(identity.id)).then(() => {
           if (messages.some(message => message.relay_key === key)) {

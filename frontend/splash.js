@@ -25,6 +25,8 @@
 
   const api = window.__TAURI__;
   const flightVideo = document.querySelector('.flight-video');
+  const splash = document.querySelector('.boot-screen.video-only');
+  const revealStatus = () => splash?.classList.add('show-status');
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   const syncMotionPreference = () => {
     if (!flightVideo) return;
@@ -33,6 +35,12 @@
   };
   syncMotionPreference();
   reducedMotion.addEventListener?.('change', syncMotionPreference);
+  if (flightVideo) {
+    flightVideo.addEventListener('error', () => {
+      revealStatus();
+      setStage(1, 'RADAR & COMMS: Не удалось запустить видео. Проверяем интерфейс…');
+    }, { once: true });
+  }
   const close = document.getElementById('splashClose');
   if (close) close.addEventListener('click', async () => {
     try { await api?.window?.getCurrentWindow?.().close(); }
@@ -43,7 +51,7 @@
     void listen('service-status', event => setStage(event.payload?.stage, event.payload?.message));
     void listen('service-error', event => {
       const message = event.payload?.message || 'Сервис не ответил. Закройте приложение и попробуйте запустить его снова.';
-      document.querySelector('.boot-screen.video-only')?.classList.add('show-status');
+      revealStatus();
       setStage(1, `RADAR & COMMS: ${message}`);
       if (bar) bar.setAttribute('aria-valuenow', '42');
     });

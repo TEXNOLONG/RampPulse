@@ -1,0 +1,25 @@
+[package]
+name = "ramppulse-server"
+version = "0.1.0"
+edition = "2021"
+description = "RampPulse VPS service"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws", "json"] }
+base64 = "0.22"
+futures-util = "0.3"
+hmac = "0.12"
+pbkdf2 = "0.12"
+rand = "0.9"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha1 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "io-util"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+uuid = { version = "1", features = ["v4"] }
+
+ramppulse-core = { path = "../rust-core" }
+

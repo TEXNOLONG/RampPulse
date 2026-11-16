@@ -31,17 +31,22 @@ body { overflow:hidden; color:#f4f6f8; font:13px/1.5 system-ui,-apple-system,"Se
 .boot-retry { margin-top:14px; padding:8px 12px; border:1px solid #ffffff50; border-radius:3px; background:#111b27; color:#fff; cursor:pointer; }
 .boot-screen.is-error .flight-kicker { color:#ff8c8c; }
 .boot-screen.is-leaving { opacity:0; transform:translate3d(0,0,0); pointer-events:none; }
-.boot-screen.video-only { display:block; padding:0; background:#000; }
+.boot-screen.video-only { display:block; padding:0; background:#080d15; }
 .boot-screen.video-only::before { background:transparent; }
-.boot-screen.video-only > :not(.flight-video) { display:none!important; }
+.boot-screen.video-only:not(.show-status) > :not(.flight-video) { visibility:hidden; opacity:0; pointer-events:none; }
 .boot-screen.video-only .flight-video { object-fit:cover; object-position:center; }
-.boot-screen.video-only.show-status > .flight-frame { position:absolute; right:24px; bottom:24px; left:24px; display:block; width:auto; padding:12px 14px; border:1px solid #ffffff35; background:#000b; }
-.boot-screen.video-only.show-status .flight-frame > :not(.flight-copy) { display:none; }
+.boot-screen.video-only.show-status > .flight-frame { position:absolute; right:clamp(18px,4vw,56px); bottom:clamp(18px,4vw,56px); left:clamp(18px,4vw,56px); display:block; width:auto; max-width:520px; padding:20px 22px; border:1px solid #ffffff30; background:#0a0e17ed; opacity:1; visibility:visible; transform:translate3d(0,0,0); transition:opacity 220ms ease,transform 220ms ease; }
+.boot-screen.video-only.show-status > .flight-hud { visibility:hidden; opacity:0; }
+.boot-screen.video-only.show-status .flight-frame > .flight-brand { display:none; }
 .boot-screen.video-only.show-status .flight-copy { padding:0; }
-.boot-screen.video-only.show-status .flight-copy h1,.boot-screen.video-only.show-status .flight-copy p { display:none; }
+.boot-screen.video-only.show-status .flight-copy h1 { margin-top:8px; font-size:clamp(20px,2.4vw,28px); }
+.boot-screen.video-only.show-status .flight-copy p { margin-top:4px; color:#c2cad2; }
+.boot-screen.video-only.show-status .boot-progress { margin-top:16px; }
+.boot-screen.video-only.show-status .boot-stages { margin-top:11px; }
+.boot-screen.video-only.show-status .boot-foot { margin-top:12px; }
 .flight-close { position:fixed; z-index:210; top:12px; right:12px; display:grid; width:30px; height:30px; place-items:center; border:1px solid #ffffff55; border-radius:3px; background:#0c121acc; color:#d2d8df; cursor:pointer; }
 .flight-close:hover { background:#18212c; color:#fff; }
 .flight-close svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; }
 .auth-startup .flight-frame { width:min(520px,100%); }
 @media (max-width:600px) { .boot-screen { padding:22px; } .flight-hud { top:14px; left:18px; right:52px; font-size:8px; } .flight-hud-group { gap:8px; } .flight-hud-group:first-child span:nth-child(2) { display:none; } .flight-brand-title { font-size:10px; } .boot-stages { gap:6px; font-size:8px; } .boot-stages i { width:12px; } .boot-foot { font-size:8px; } }
-@media (prefers-reduced-motion:reduce) { .boot-screen,.boot-progress span { transition:none; } }
+@media (prefers-reduced-motion:reduce) { .boot-screen,.boot-progress span,.boot-screen.video-only.show-status > .flight-frame { transition:none; } }
