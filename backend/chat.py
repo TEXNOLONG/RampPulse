@@ -42,6 +42,7 @@ class ChatArchive:
                 ("media_type", "TEXT"),
                 ("media_name", "TEXT"),
                 ("duration", "INTEGER"),
+                ("sender_username", "TEXT"),
             ]:
                 try:
                     self.connection.execute(f"ALTER TABLE chat_archive ADD COLUMN {col} {col_type}")
@@ -51,14 +52,15 @@ class ChatArchive:
     def save(self, *, relay_key: str, room_kind: str, sender_id: int, sender_name: str,
              recipient_id: int | None, body: str, sticker: str | None = None,
              media_url: str | None = None, media_type: str | None = None,
-             media_name: str | None = None, duration: int | None = None) -> dict:
+             media_name: str | None = None, duration: int | None = None,
+             sender_username: str | None = None) -> dict:
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self.lock, self.connection:
             self.connection.execute(
                 """INSERT OR IGNORE INTO chat_archive
-                   (relay_key,room_kind,sender_id,sender_name,recipient_id,body,sticker,media_url,media_type,media_name,duration,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (relay_key, room_kind, sender_id, sender_name, recipient_id, body, sticker, media_url, media_type, media_name, duration, created_at),
+                   (relay_key,room_kind,sender_id,sender_name,recipient_id,body,sticker,media_url,media_type,media_name,duration,sender_username,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (relay_key, room_kind, sender_id, sender_name, recipient_id, body, sticker, media_url, media_type, media_name, duration, sender_username, created_at),
             )
             row = self.connection.execute(
                 "SELECT * FROM chat_archive WHERE relay_key=?", (relay_key,)
@@ -95,3 +97,30 @@ class ChatArchive:
                 (user_id, now, relay_key, sender_id, user_id, user_id),
             )
         return cursor.rowcount > 0
+
+    def search(self, query: str, *, user_id: int, room_kind: str | None = None, peer_id: int | None = None, limit: int = 50) -> list[dict]:
+        q = f"%{(query or '').strip().lower()}%"
+        conditions = ["(LOWER(body) LIKE ? OR LOWER(media_name) LIKE ? OR LOWER(sender_name) LIKE ? OR LOWER(COALESCE(sender_username, '')) LIKE ?)"]
+        params = [q, q, q, q]
+
+        if room_kind == "shift":
+            conditions.append("room_kind = 'shift'")
+        elif room_kind == "direct":
+            if peer_id is not None:
+                conditions.append("room_kind = 'direct' AND ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))")
+                params.extend([user_id, peer_id, peer_id, user_id])
+            else:
+                conditions.append("room_kind = 'direct' AND (sender_id = ? OR recipient_id = ?)")
+                params.extend([user_id, user_id])
+        else:
+            conditions.append("(room_kind = 'shift' OR (room_kind = 'direct' AND (sender_id = ? OR recipient_id = ?)))")
+            params.extend([user_id, user_id])
+
+        params.append(limit)
+        sql = f"""SELECT * FROM chat_archive WHERE {' AND '.join(conditions)} ORDER BY rowid DESC LIMIT ?"""
+        with self.lock:
+            rows = self.connection.execute(sql, params).fetchall()
+        return [
+            {**dict(row), "room_id": 0, "from_user_id": row["sender_id"]}
+            for row in reversed(rows)
+        ]

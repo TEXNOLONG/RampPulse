@@ -24,6 +24,7 @@ DEMO_DISPATCHER_PASSWORD = "Dispatcher2026!"
 DEMO_ENGINEER_PASSWORD = "Engineer2026!"
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{3,30}$")
 
 
 class AuthError(ValueError):
@@ -83,8 +84,16 @@ def _parse_types(value) -> list[str]:
 
 
 def public_user(row) -> dict:
+    uname = ""
+    if "username" in row.keys() and row["username"]:
+        uname = str(row["username"]).strip().lower()
+    if not uname:
+        uname = f"user{row['id']}"
     return {
         "id": row["id"],
+        "username": uname,
+        "bio": str(row["bio"]).strip() if "bio" in row.keys() and row["bio"] else "Сотрудник дежурной смены RampPulse SVO",
+        "avatar_color": str(row["avatar_color"]).strip() if "avatar_color" in row.keys() and row["avatar_color"] else "#2563EB",
         "email": row["email"],
         "name": row["name"],
         "role": row["role"],
@@ -145,6 +154,35 @@ class AuthStore:
             columns = {row["name"] for row in self.c.execute("PRAGMA table_info(users)")}
             if "on_shift" not in columns:
                 self.c.execute("ALTER TABLE users ADD COLUMN on_shift INTEGER NOT NULL DEFAULT 1")
+            if "username" not in columns:
+                self.c.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            if "bio" not in columns:
+                self.c.execute("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''")
+            if "avatar_color" not in columns:
+                self.c.execute("ALTER TABLE users ADD COLUMN avatar_color TEXT DEFAULT ''")
+            
+            # Автоматически заполнить пустые юзернеймы существующим пользователям
+            rows = self.c.execute("SELECT id, email, role, name, username FROM users").fetchall()
+            for r in rows:
+                if not r["username"]:
+                    base_name = ""
+                    email_prefix = (r["email"] or "").split("@")[0].strip().lower()
+                    if r["role"] == "dispatcher":
+                        base_name = "orlov" if "dispatcher" in email_prefix else email_prefix
+                    else:
+                        base_name = email_prefix or f"user{r['id']}"
+                    # Очистить от недопустимых символов
+                    clean_uname = re.sub(r"[^a-zA-Z0-9_]", "_", base_name)[:30]
+                    if len(clean_uname) < 3:
+                        clean_uname = f"user_{r['id']}"
+                    # Проверить коллизию
+                    candidate = clean_uname
+                    suffix = 1
+                    while self.c.execute("SELECT 1 FROM users WHERE username = ? AND id != ?", (candidate, r["id"])).fetchone():
+                        candidate = f"{clean_uname[:25]}_{suffix}"
+                        suffix += 1
+                    self.c.execute("UPDATE users SET username = ? WHERE id = ?", (candidate, r["id"]))
+            self.c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username IS NOT NULL")
 
     # ---------- чтение ----------
     def _one(self, sql: str, params=()):
@@ -191,6 +229,63 @@ class AuthStore:
     def has_dispatcher(self) -> bool:
         return self._one("SELECT 1 FROM users WHERE role = 'dispatcher' LIMIT 1") is not None
 
+    def search_users(self, query: str) -> list[dict]:
+        q = f"%{(query or '').strip().lower()}%"
+        rows = self._all(
+            """SELECT * FROM users
+               WHERE status = 'active' AND (
+                   LOWER(username) LIKE ? OR
+                   LOWER(name) LIKE ? OR
+                   LOWER(email) LIKE ? OR
+                   LOWER(COALESCE(qual, '')) LIKE ?
+               )
+               ORDER BY (CASE WHEN role = 'dispatcher' THEN 0 ELSE 1 END), name""",
+            (q, q, q, q),
+        )
+        return [public_user(r) for r in rows]
+
+    def update_profile(self, user_id: int, username: str | None = None, name: str | None = None, bio: str | None = None, avatar_color: str | None = None) -> dict:
+        with self.lock, self.c:
+            row = self.c.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+            if not row:
+                raise AuthError("Пользователь не найден", "not_found")
+            
+            updates = []
+            params = []
+            if username is not None:
+                uname = username.strip().lower()
+                if uname.startswith("@"):
+                    uname = uname[1:]
+                if not USERNAME_RE.match(uname):
+                    raise AuthError("Юзернейм должен содержать от 3 до 30 латинских букв, цифр или подчёркиваний", "invalid_username")
+                existing = self.c.execute("SELECT 1 FROM users WHERE username = ? AND id != ?", (uname, int(user_id))).fetchone()
+                if existing:
+                    raise AuthError(f"Юзернейм @{uname} уже занят другим сотрудником", "username_taken")
+                updates.append("username = ?")
+                params.append(uname)
+
+            if name is not None:
+                cleaned_name = name.strip()
+                if len(cleaned_name) < 2 or len(cleaned_name) > 120:
+                    raise AuthError("Имя должно содержать от 2 до 120 символов", "invalid_name")
+                updates.append("name = ?")
+                params.append(cleaned_name)
+
+            if bio is not None:
+                updates.append("bio = ?")
+                params.append(bio.strip()[:200])
+
+            if avatar_color is not None:
+                updates.append("avatar_color = ?")
+                params.append(avatar_color.strip()[:30])
+
+            if updates:
+                params.append(int(user_id))
+                self.c.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+            
+            row = self.c.execute("SELECT * FROM users WHERE id = ?", (int(user_id),)).fetchone()
+            return public_user(row)
+
     # ---------- регистрация ----------
     def register_engineer(
         self,
@@ -200,6 +295,7 @@ class AuthStore:
         qual: str,
         types: list[str],
         base: str,
+        username: str | None = None,
     ) -> dict:
         name = (name or "").strip()
         email = normalize_email(email)
@@ -217,15 +313,27 @@ class AuthStore:
         if not base:
             raise AuthError("Выберите базу", "invalid_base")
 
+        uname = (username or "").strip().lower()
+        if uname.startswith("@"):
+            uname = uname[1:]
+        if not uname:
+            uname = re.sub(r"[^a-zA-Z0-9_]", "_", email.split("@")[0])[:30]
+        if len(uname) < 3:
+            uname = f"tech_{int(time.time()) % 10000}"
+        if not USERNAME_RE.match(uname):
+            raise AuthError("Юзернейм должен содержать от 3 до 30 латинских букв, цифр или подчёркиваний", "invalid_username")
+
         password_hash = hash_password(password)
         with self.lock, self.c:
             if self.c.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
                 raise AuthError("Аккаунт с таким email уже существует", "email_exists")
+            if self.c.execute("SELECT 1 FROM users WHERE username = ?", (uname,)).fetchone():
+                raise AuthError(f"Юзернейм @{uname} уже занят", "username_taken")
             cur = self.c.execute(
                 """INSERT INTO users
-                   (email, password_hash, name, role, status, qual, types, base, on_shift, created_at)
-                   VALUES (?, ?, ?, 'engineer', 'pending', ?, ?, ?, 0, ?)""",
-                (email, password_hash, name, qual, json.dumps(types, ensure_ascii=False), base, _now_iso()),
+                   (email, username, password_hash, name, role, status, qual, types, base, on_shift, created_at)
+                   VALUES (?, ?, ?, ?, 'engineer', 'pending', ?, ?, ?, 0, ?)""",
+                (email, uname, password_hash, name, qual, json.dumps(types, ensure_ascii=False), base, _now_iso()),
             )
             row = self.c.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
         return public_user(row)
@@ -321,8 +429,8 @@ class AuthStore:
             password_hash = hash_password(password)
             cur = self.c.execute(
                 """INSERT INTO users
-                   (email, password_hash, name, role, status, created_at, approved_at)
-                   VALUES (?, ?, ?, 'dispatcher', 'active', ?, ?)""",
+                   (email, username, password_hash, name, role, status, created_at, approved_at)
+                   VALUES (?, 'orlov', ?, ?, 'dispatcher', 'active', ?, ?)""",
                 (email, password_hash, name, _now_iso(), _now_iso()),
             )
             row = self.c.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -340,8 +448,8 @@ class AuthStore:
             if not dispatcher:
                 self.c.execute(
                     """INSERT INTO users
-                       (email, password_hash, name, role, status, created_at, approved_at)
-                       VALUES (?, ?, ?, 'dispatcher', 'active', ?, ?)""",
+                       (email, username, password_hash, name, role, status, created_at, approved_at)
+                       VALUES (?, 'orlov', ?, ?, 'dispatcher', 'active', ?, ?)""",
                     (
                         "dispatcher@oto.ru",
                         hash_password(DEMO_DISPATCHER_PASSWORD),
@@ -353,6 +461,7 @@ class AuthStore:
 
             for i, tech in enumerate(technicians, 1):
                 email = f"tech{i}@oto.ru"
+                uname = f"tech{i}"
                 exists = self.c.execute(
                     "SELECT 1 FROM users WHERE email = ? OR tech_id = ?", (email, i)
                 ).fetchone()
@@ -360,11 +469,12 @@ class AuthStore:
                     continue
                 self.c.execute(
                     """INSERT INTO users
-                       (email, password_hash, name, role, status, qual, types, base, tech_id, on_shift,
+                       (email, username, password_hash, name, role, status, qual, types, base, tech_id, on_shift,
                         speed, created_at, approved_at)
-                       VALUES (?, ?, ?, 'engineer', 'active', ?, ?, ?, ?, 1, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, 'engineer', 'active', ?, ?, ?, ?, 1, ?, ?, ?)""",
                     (
                         email,
+                        uname,
                         hash_password(DEMO_ENGINEER_PASSWORD),
                         tech.get("name", f"Инженер {i}"),
                         tech.get("qual"),

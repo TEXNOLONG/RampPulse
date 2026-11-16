@@ -62,11 +62,13 @@ function bootStage(stage, message) {
 
 async function finishBoot() {
   bootStage(3, 'Смена готова к работе');
+  document.body.classList.add('is-ready');
   if (window.otoBridge) {
     const nativeSplashAlreadyShown = await window.otoBridge.consumeDesktopStartup().catch(() => false);
-    await window.otoBridge.revealSplash('bootScreen', bootStartedAt, nativeSplashAlreadyShown ? 0 : 1800);
+    await window.otoBridge.revealSplash('bootScreen', bootStartedAt, nativeSplashAlreadyShown ? 0 : 1500).catch(() => {});
   }
-  else { await new Promise(resolve => setTimeout(resolve, Math.max(0, 1800 - (performance.now() - bootStartedAt)))); document.body.classList.add('is-ready'); setTimeout(() => $('#bootScreen')?.remove(), 460); }
+  else { await new Promise(resolve => setTimeout(resolve, Math.max(0, 1500 - (performance.now() - bootStartedAt)))); }
+  setTimeout(() => $('#bootScreen')?.remove(), 320);
 }
 
 window.addEventListener('error', e => {
@@ -451,9 +453,154 @@ function initMapEvents() {
     window.otoDesktop.setStartupView(next ? '3d' : '2d');
     render();
   };
-  const settings = $('#appSettings'), settingsDlg = $('#settingsDlg'), startupView = $('#startupView');
-  if (settings && settingsDlg) settings.onclick = () => settingsDlg.showModal();
-  if (startupView) startupView.onchange = () => window.otoDesktop.setStartupView(startupView.value === '3d' ? '3d' : '2d');
+  const settings = $('#appSettings'), settingsDlg = $('#settingsDlg');
+  let selectedAvatarColor = '#2AABEE';
+
+  if (settings && settingsDlg) {
+    settings.onclick = () => {
+      const u = window.otoBridge?.user || S.user || {};
+      const uname = u.username || 'orlov';
+      const name = u.name || 'Орлов А. В.';
+      const roleRu = u.role === 'dispatcher' ? 'Диспетчер смены' : `Инженер ТО (${u.qual || 'Все типы'})`;
+      const initials = name.split(/\s+/).map(p => p[0]).join('').slice(0, 2).toUpperCase() || 'ОР';
+      
+      const bigAvatar = $('#tgUserBigAvatar');
+      if (bigAvatar) {
+        bigAvatar.textContent = initials;
+        selectedAvatarColor = u.avatar_color || '#2AABEE';
+        bigAvatar.style.background = `linear-gradient(135deg, ${selectedAvatarColor}, #17212b)`;
+      }
+
+      const pTitle = $('#tgProfileTitle');
+      if (pTitle) pTitle.textContent = name;
+      const pSub = $('#tgProfileSubtitle');
+      if (pSub) pSub.textContent = `@${uname} · 🟢 в сети`;
+
+      const inpName = $('#settingName');
+      if (inpName) inpName.value = name;
+      const inpUname = $('#settingUsername');
+      if (inpUname) inpUname.value = uname;
+      const inpBio = $('#settingBio');
+      if (inpBio) inpBio.value = u.bio || 'Диспетчер смены перрона Шереметьево · RampPulse';
+
+      const uEmail = $('#tgUserEmail');
+      if (uEmail) uEmail.textContent = u.email || 'dispatcher@oto.ru';
+      const uRole = $('#tgUserRole');
+      if (uRole) uRole.textContent = roleRu;
+      const uTech = $('#tgUserTechId');
+      if (uTech) uTech.textContent = u.tech_id ? `TECH-${u.tech_id}` : 'DISP-01';
+
+      settingsDlg.showModal();
+    };
+  }
+
+  // Color picker
+  $$('.color-dot').forEach(btn => {
+    btn.onclick = () => {
+      $$('.color-dot').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedAvatarColor = btn.dataset.color || '#2AABEE';
+      const bigAvatar = $('#tgUserBigAvatar');
+      if (bigAvatar) bigAvatar.style.background = `linear-gradient(135deg, ${selectedAvatarColor}, #17212b)`;
+    };
+  });
+
+  // Save profile
+  const btnSaveTg = $('#btnSaveTelegramProfile');
+  if (btnSaveTg) {
+    btnSaveTg.onclick = async () => {
+      const newName = ($('#settingName')?.value || '').trim();
+      const newUname = ($('#settingUsername')?.value || '').trim().replace(/^@/, '');
+      const newBio = ($('#settingBio')?.value || '').trim();
+
+      if (!newName || !newUname) return alert('Заполните ФИО и позывной (@юзернейм)');
+      btnSaveTg.textContent = 'Сохранение...';
+      try {
+        const payload = {
+          name: newName,
+          username: newUname,
+          bio: newBio,
+          avatar_color: selectedAvatarColor
+        };
+        let data;
+        if (window.otoBridge?.post) {
+          data = await window.otoBridge.post('/api/profile/update', payload);
+        } else {
+          const resp = await fetch('/api/profile/update', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+          });
+          data = await resp.json();
+          if (!resp.ok) throw new Error(data.detail || 'Не удалось сохранить');
+        }
+        if (window.otoBridge?.user) {
+          window.otoBridge.user.name = newName;
+          window.otoBridge.user.username = newUname;
+          window.otoBridge.user.bio = newBio;
+          window.otoBridge.user.avatar_color = selectedAvatarColor;
+        }
+        if (S.user) {
+          S.user.name = newName;
+          S.user.username = newUname;
+          S.user.bio = newBio;
+          S.user.avatar_color = selectedAvatarColor;
+        }
+        $('#tgProfileTitle').textContent = newName;
+        $('#tgProfileSubtitle').textContent = `@${newUname} · 🟢 в сети`;
+        const hdrName = $('#headerProfileName');
+        if (hdrName) hdrName.textContent = `@${newUname}`;
+        const ua = $('#userAvatar');
+        if (ua) {
+          ua.textContent = newName.slice(0, 1).toUpperCase();
+          ua.style.background = selectedAvatarColor;
+        }
+        alert(`Профиль успешно обновлён!\nПозывной: @${newUname}\nИмя: ${newName}`);
+      } catch (err) {
+        alert('Ошибка сохранения профиля: ' + err.message);
+      } finally {
+        btnSaveTg.textContent = '💾 Сохранить изменения профиля';
+      }
+    };
+  }
+
+  const hdrProfBtn = $('#headerProfileBtn');
+  if (hdrProfBtn) hdrProfBtn.onclick = () => $('#appSettings')?.click();
+  const uAvatar = $('#userAvatar');
+  if (uAvatar) {
+    uAvatar.style.cursor = 'pointer';
+    uAvatar.title = 'Открыть профиль и настройки';
+    uAvatar.onclick = () => $('#appSettings')?.click();
+  }
+
+  // Ping test
+  const btnPing = $('#btnTestPing');
+  if (btnPing) {
+    btnPing.onclick = async () => {
+      const lbl = $('#tgPingLabel');
+      if (lbl) lbl.textContent = 'Замер...';
+      const start = performance.now();
+      try {
+        const r = await fetch('/healthz?_t=' + Date.now());
+        const elapsed = Math.round(performance.now() - start);
+        if (lbl) lbl.textContent = `${elapsed} мс (Отлично)`;
+      } catch (err) {
+        if (lbl) lbl.textContent = 'Ошибка';
+      }
+    };
+  }
+
+  const closeBtns = [$('#tgCloseSettings'), $('#tgDoneBtn')];
+  closeBtns.forEach(b => { if (b) b.onclick = () => settingsDlg?.close(); });
+  const logoutBtn = $('#tgLogoutBtn');
+  if (logoutBtn) logoutBtn.onclick = () => {
+    if (confirm('Выйти из учётной записи?')) {
+      document.cookie = 'oto_session=; Max-Age=0; path=/';
+      window.location.href = '/login';
+    }
+  };
+
   if (settingsDlg) settingsDlg.addEventListener('click', ev => {
     if (ev.target === settingsDlg) settingsDlg.close();
   });
@@ -1433,10 +1580,14 @@ function initUI() {
     await finishBoot();
   } catch (e) {
     console.error('Ошибка инициализации:', e);
+    const bs = $('#bootScreen');
+    if (bs) {
+      bs.classList.remove('video-only');
+      bs.classList.add('is-error');
+    }
     const status = $('#bootStatus');
     if (status) status.textContent = `Не удалось загрузить смену: ${errorText(e)}`;
     const retry = $('#bootRetry');
     if (retry) { retry.hidden = false; retry.onclick = () => location.reload(); }
-    $('#bootScreen')?.classList.add('is-error');
   }
 })();

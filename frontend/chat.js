@@ -39,11 +39,41 @@
   function renderStickerPicker() {
     $('#stickerPicker').innerHTML = stickers.map(([key,label,icon]) => `<button type="button" class="sticker-choice" data-sticker="${key}" aria-label="Отправить стикер: ${label}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg><span>${label}</span></button>`).join('');
   }
+  let contactQuery = '';
   function renderRooms() {
+    const q = contactQuery.trim().toLowerCase().replace(/^@/, '');
     const existing = new Set(rooms.filter(room => room.kind === 'direct').map(room => Number(room.peer_id)));
-    const roomButtons = rooms.map(room => `<button type="button" class="chat-room ${Number(selectedRoom?.id) === Number(room.id) ? 'active' : ''}" data-room-id="${room.id}" data-room-kind="${esc(room.kind)}"><span class="chat-room-mark">${room.kind === 'shift' ? 'S' : esc((room.peer_name || room.name || '·').trim().slice(0,1).toUpperCase())}</span><span class="chat-room-copy"><b>${esc(room.kind === 'shift' ? room.name : room.peer_name || room.name)}</b><small>${room.kind === 'shift' ? 'Общий канал' : 'Личный чат'}</small></span>${Number(room.unread) ? `<i class="chat-room-count">${room.unread}</i>` : ''}</button>`).join('');
-    const contactButtons = contacts.filter(person => !existing.has(Number(person.id))).map(person => `<button type="button" class="chat-room" data-contact-id="${person.id}"><span class="chat-room-mark">${esc(person.name.trim().slice(0,1).toUpperCase())}</span><span class="chat-room-copy"><b>${esc(person.name)}</b><small>${person.on_shift ? 'На смене · личный чат' : 'Личный чат'}</small></span><i class="contact-led ${person.on_shift ? 'online' : ''}"></i></button>`).join('');
-    $('#chatRooms').innerHTML = `<div class="chat-room-section-label">КАНАЛЫ И ДИАЛОГИ</div>${roomButtons}${contactButtons ? '<div class="chat-room-section-label contacts-label">СОТРУДНИКИ</div>' + contactButtons : ''}`;
+    const filteredRooms = rooms.filter(room => {
+      if (!q) return true;
+      const name = (room.kind === 'shift' ? room.name : room.peer_name || room.name || '').toLowerCase();
+      return name.includes(q) || (room.kind === 'shift' && ('общий'.includes(q) || 'смена'.includes(q) || 'канал'.includes(q)));
+    });
+    const roomButtons = filteredRooms.map(room => `<button type="button" class="chat-room ${Number(selectedRoom?.id) === Number(room.id) ? 'active' : ''}" data-room-id="${room.id}" data-room-kind="${esc(room.kind)}"><span class="chat-room-mark">${room.kind === 'shift' ? 'S' : esc((room.peer_name || room.name || '·').trim().slice(0,1).toUpperCase())}</span><span class="chat-room-copy"><b>${esc(room.kind === 'shift' ? room.name : room.peer_name || room.name)}</b><small>${room.kind === 'shift' ? 'Общий канал' : 'Личный чат'}</small></span>${Number(room.unread) ? `<i class="chat-room-count">${room.unread}</i>` : ''}</button>`).join('');
+
+    const filteredContacts = contacts.filter(person => {
+      if (existing.has(Number(person.id))) return false;
+      if (!q) return true;
+      const uname = (person.username || '').toLowerCase();
+      const pname = (person.name || '').toLowerCase();
+      const qual = (person.qual || '').toLowerCase();
+      return uname.includes(q) || pname.includes(q) || qual.includes(q);
+    });
+    const contactButtons = filteredContacts.map(person => {
+      const uname = person.username ? ` <span class="chat-uname">@${esc(person.username)}</span>` : '';
+      return `<button type="button" class="chat-room" data-contact-id="${person.id}"><span class="chat-room-mark">${esc(person.name.trim().slice(0,1).toUpperCase())}</span><span class="chat-room-copy"><b>${esc(person.name)}${uname}</b><small>${person.on_shift ? 'На смене · личный чат' : 'Личный чат'}</small></span><i class="contact-led ${person.on_shift ? 'online' : ''}"></i></button>`;
+    }).join('');
+
+    $('#chatRooms').innerHTML = `<div class="chat-search-wrap"><input type="search" id="chatSearchInput" class="chat-search-input" placeholder="🔍 Поиск (@юзернейм, имя)..." value="${esc(contactQuery)}"/></div><div class="chat-room-section-label">КАНАЛЫ И ДИАЛОГИ</div>${roomButtons}${contactButtons ? '<div class="chat-room-section-label contacts-label">СОТРУДНИКИ</div>' + contactButtons : ''}`;
+
+    const searchInp = $('#chatSearchInput');
+    if (searchInp) {
+      searchInp.oninput = (e) => {
+        contactQuery = e.target.value;
+        renderRooms();
+        const next = $('#chatSearchInput');
+        if (next) { next.focus(); next.selectionStart = next.selectionEnd = next.value.length; }
+      };
+    }
   }
   function renderMessages() {
     const container = $('#chatMessages');
@@ -53,6 +83,7 @@
     }
     container.innerHTML = messages.map(message => {
       const own = Number(message.sender_id) === Number(identity.id);
+      const unameTag = message.sender_username ? ` <span class="chat-msg-uname">@${esc(message.sender_username)}</span>` : '';
       const sticker = message.sticker ? stickerHtml(message.sticker, true) : '';
       let mediaHtml = '';
       if (message.media_url) {
@@ -65,9 +96,9 @@
         }
       }
       const key = keyFor(message);
-      const status = pendingMessages.has(key) ? 'Отправка…' : failedMessages.has(key) ? 'Не доставлено' : message.read ? 'Прочитано' : 'Отправлено';
+      const status = pendingMessages.has(key) ? '🕒' : failedMessages.has(key) ? '⚠️ Ошибка' : message.read ? '✓✓' : '✓';
       const retry = own && failedMessages.has(key) ? `<button class="chat-retry" type="button" data-retry-message="${esc(key)}">Повторить</button>` : '';
-      return `<article class="chat-message ${own ? 'own' : ''} ${failedMessages.has(key) ? 'delivery-failed' : ''}" data-message-key="${esc(key)}"><div class="chat-message-top"><b>${own ? 'Вы' : esc(message.sender_name || 'Участник')}</b><time>${esc(timeLabel(message.created_at))}</time></div>${message.body ? `<p>${esc(message.body)}</p>` : ''}${sticker}${mediaHtml}<div class="chat-message-meta">${own ? status : 'Смена'}${retry}</div></article>`;
+      return `<article class="chat-message ${own ? 'own' : ''} ${failedMessages.has(key) ? 'delivery-failed' : ''}" data-message-key="${esc(key)}"><div class="chat-message-top"><b>${own ? 'Вы' : esc(message.sender_name || 'Участник')}${unameTag}</b><time>${esc(timeLabel(message.created_at))}</time></div>${message.body ? `<p>${esc(message.body)}</p>` : ''}${sticker}${mediaHtml}<div class="chat-message-meta">${own ? status : 'Смена'}${retry}</div></article>`;
     }).join('');
     container.scrollTop = container.scrollHeight;
   }
@@ -163,7 +194,19 @@
     toastIncoming.timer = setTimeout(() => { node.hidden = true; }, 3600);
   }
   async function send(body = '', sticker = null, media = null) {
-    if (!selectedRoom || (!body.trim() && !sticker && !media)) return;
+    if (!identity) {
+      toastIncoming('Вход в систему', 'Для отправки сообщений необходимо войти в систему.');
+      return;
+    }
+    if (!selectedRoom && rooms.length > 0) {
+      selectedRoom = rooms.find(room => room.kind === 'shift') || rooms[0];
+      await loadSelectedRoom();
+    }
+    if (!selectedRoom) {
+      toastIncoming('Чат не выбран', 'Выберите контакт или канал для отправки.');
+      return;
+    }
+    if (!body.trim() && !sticker && !media) return;
     const targetRoom = {...selectedRoom};
     const relayKey = crypto.randomUUID ? crypto.randomUUID() : `${identity.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const args = {
@@ -273,6 +316,9 @@
     }, 500);
   }
   async function preparePeer() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('Доступ к микрофону заблокирован браузером по незащищённому HTTP. Откройте приложение через RampPulse.exe (где микрофон работает напрямую через ОС) либо настройте HTTPS.');
+    }
     call.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
     call.pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
     call.stream.getTracks().forEach(track => call.pc.addTrack(track, call.stream));
@@ -393,6 +439,12 @@
       const button = event.target.closest('[data-retry-message]');
       if (button) retryMessage(button.dataset.retryMessage).catch(error => toastIncoming('Не доставлено', window.otoBridge.errorMessage(error)));
     });
+    $('#chatInput').addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        $('#chatForm').dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+      }
+    });
     $('#chatInput').addEventListener('input', event => { const field = event.currentTarget; field.style.height='auto'; field.style.height=`${Math.min(field.scrollHeight,112)}px`; });
     $('#chatStickerToggle').addEventListener('click', () => { $('#stickerPicker').hidden = !$('#stickerPicker').hidden; });
     const fileBtn = $('#chatFileBtn');
@@ -422,6 +474,10 @@
     let voiceStart = 0;
     if (voiceBtn) {
       voiceBtn.addEventListener('click', async () => {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          alert('⚠️ Доступ к микрофону заблокирован браузером:\nБраузеры (Chrome/Edge/Firefox) отключают микрофон на незащищённых HTTP-сайтах.\n\nРешение:\n1. Запустите нативное приложение RampPulse.exe (в нём микрофон работает напрямую через Windows без ограничений браузера);\n2. Либо используйте защищённое HTTPS-соединение.');
+          return;
+        }
         if (!mediaRecorder || mediaRecorder.state === 'inactive') {
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });

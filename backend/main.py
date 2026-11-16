@@ -188,6 +188,14 @@ class RegisterBody(BaseModel):
     qual: str
     types: list[str] = []
     base: str
+    username: str | None = None
+
+
+class ProfileUpdateBody(BaseModel):
+    username: str | None = None
+    name: str | None = None
+    bio: str | None = None
+    avatar_color: str | None = None
 
 
 class NewRequest(BaseModel):
@@ -290,7 +298,7 @@ def register(body: RegisterBody):
         raise HTTPException(400, "Неизвестный тип ВС: " + ", ".join(invalid_types))
     try:
         user = auth.register_engineer(
-            body.name, body.email, body.password, body.qual, body.types, body.base
+            body.name, body.email, body.password, body.qual, body.types, body.base, body.username
         )
     except AuthError as e:
         raise HTTPException(400, str(e))
@@ -322,8 +330,18 @@ def get_state(user: dict = Depends(current_user)):
 
 @app.get("/api/chat/contacts")
 def chat_contacts(user: dict = Depends(current_user)):
-    contacts = auth.list_active_engineers() if user["role"] == "dispatcher" else auth.list_active_dispatchers()
-    return {"contacts": [{"id": item["id"], "name": item["name"], "role": item["role"], "on_shift": item.get("on_shift", True)} for item in contacts]}
+    all_users = auth.list_active_dispatchers() + auth.list_active_engineers()
+    contacts = [u for u in all_users if u["id"] != user["id"]]
+    return {"contacts": [
+        {
+            "id": item["id"],
+            "username": item.get("username") or f"user{item['id']}",
+            "name": item["name"],
+            "role": item["role"],
+            "qual": item.get("qual"),
+            "on_shift": item.get("on_shift", True),
+        } for item in contacts
+    ]}
 
 
 @app.get("/api/chat/history")
@@ -341,8 +359,10 @@ def chat_history(room_kind: str, peer_id: int | None = None, user: dict = Depend
 
 def _chat_peer(user: dict, recipient_id: int) -> dict:
     peer = auth.get_user(recipient_id)
-    if not peer or peer["status"] != "active" or peer["role"] == user["role"]:
+    if not peer or peer["status"] != "active":
         raise HTTPException(404, "Собеседник недоступен")
+    if peer["id"] == user["id"]:
+        raise HTTPException(400, "Нельзя писать самому себе")
     return peer
 
 
@@ -366,7 +386,13 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
         recipient_ids = [peer["id"] for peer in auth.list_active_dispatchers() + auth.list_active_engineers() if peer["id"] != user["id"]]
     else:
         raise HTTPException(400, "Неизвестный тип чата")
-    message = {**body.message, "from_user_id": user["id"], "sender_name": user["name"]}
+    sender_uname = user.get("username") or f"user{user['id']}"
+    message = {
+        **body.message,
+        "from_user_id": user["id"],
+        "sender_name": user["name"],
+        "sender_username": sender_uname,
+    }
     raw_text = message.get("body") or ""
     sticker = message.get("sticker")
     media_url = message.get("media_url")
@@ -395,6 +421,7 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
         media_type=str(media_type) if media_type else None,
         media_name=str(media_name) if media_name else None,
         duration=int(duration) if duration is not None else None,
+        sender_username=sender_uname,
     )
     message.update(archived)
     message["room_kind"] = body.room_kind
@@ -402,6 +429,31 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
     for recipient_id in recipient_ids:
         await _send_to_user(recipient_id, event)
     return {"ok": True}
+
+
+@app.post("/api/profile/update")
+def update_profile(body: ProfileUpdateBody, user: dict = Depends(current_user)):
+    try:
+        updated = auth.update_profile(
+            user["id"],
+            username=body.username,
+            name=body.name,
+            bio=body.bio,
+            avatar_color=body.avatar_color,
+        )
+        return {"ok": True, "user": updated}
+    except AuthError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/users/search")
+def search_users(q: str = "", user: dict = Depends(current_user)):
+    return {"users": auth.search_users(q)}
+
+
+@app.get("/api/chat/search")
+def search_chat_messages(q: str = "", room_kind: str | None = None, peer_id: int | None = None, user: dict = Depends(current_user)):
+    return {"messages": chat_archive.search(q, user_id=user["id"], room_kind=room_kind, peer_id=peer_id)}
 
 
 @app.post("/api/chat/upload")

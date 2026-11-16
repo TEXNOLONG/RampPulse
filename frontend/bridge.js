@@ -69,6 +69,9 @@ window.otoBridge = {
     async revealSplash(id, startedAt = performance.now(), minimumMs = 1800) {
         await new Promise(resolve => setTimeout(resolve, Math.max(0, minimumMs - (performance.now() - startedAt))));
         const splash = document.getElementById(id);
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.classList.add('is-ready');
+        }
         if (!splash)
             return;
         splash.setAttribute('aria-hidden', 'true');

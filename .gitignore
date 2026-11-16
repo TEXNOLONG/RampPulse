@@ -16,3 +16,7 @@ release/*.pkg.tar.zst
 release/*.deb
 release/*.rpm
 release/*.zip
+build/
+dist/
+*.spec
+

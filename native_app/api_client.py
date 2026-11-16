@@ -129,18 +129,56 @@ class RampPulseClient:
         resp.raise_for_status()
         return resp.json()
 
-    def register_engineer(self, name: str, email: str, password: str, qual: str, types: List[str], base: str) -> Dict[str, Any]:
+    def register_engineer(self, name: str, email: str, password: str, qual: str, types: List[str], base: str, username: Optional[str] = None) -> Dict[str, Any]:
         url = f"{self.base_url}/api/auth/register"
-        resp = self.session.post(url, json={
+        payload = {
             "name": name,
             "email": email,
             "password": password,
             "qual": qual,
             "types": types,
-            "base": base
-        }, timeout=10)
+            "base": base,
+        }
+        if username:
+            payload["username"] = username
+        resp = self.session.post(url, json=payload, timeout=10)
         resp.raise_for_status()
         return resp.json()
+
+    def update_profile(self, username: Optional[str] = None, name: Optional[str] = None, bio: Optional[str] = None, avatar_color: Optional[str] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/profile/update"
+        payload = {}
+        if username is not None:
+            payload["username"] = username
+        if name is not None:
+            payload["name"] = name
+        if bio is not None:
+            payload["bio"] = bio
+        if avatar_color is not None:
+            payload["avatar_color"] = avatar_color
+        resp = self.session.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if "user" in data:
+            self.user = data["user"]
+        return data
+
+    def search_users(self, query: str) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/api/users/search"
+        resp = self.session.get(url, params={"q": query}, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("users", [])
+
+    def search_chat(self, query: str, room_kind: Optional[str] = None, peer_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        url = f"{self.base_url}/api/chat/search"
+        params = {"q": query}
+        if room_kind:
+            params["room_kind"] = room_kind
+        if peer_id:
+            params["peer_id"] = peer_id
+        resp = self.session.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("messages", [])
 
     def arrive_request(self, rid: int) -> Dict[str, Any]:
         if self.user and self.user.get("role") == "engineer":

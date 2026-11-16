@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QDateTime, QPointF, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -336,11 +337,52 @@ class MainWindow(QMainWindow):
         left_panel = QFrame(self)
         left_panel.setStyleSheet("background-color: #0B1120; border: 1px solid #1E293B; border-radius: 8px;")
         l_layout = QVBoxLayout(left_panel)
-        l_layout.addWidget(QLabel("КАНАЛЫ И СОТРУДНИКИ", self))
+        
+        lbl_head = QLabel("💬 ЧАТ И КОНТАКТЫ", self)
+        lbl_head.setStyleSheet("font-weight: bold; font-size: 13px; color: #38BDF8; margin-bottom: 4px;")
+        l_layout.addWidget(lbl_head)
+
+        # Поиск по контактам и позывным (@username)
+        self.contact_search = QLineEdit(self)
+        self.contact_search.setPlaceholderText("🔍 Поиск (@юзернейм, имя)...")
+        self.contact_search.setStyleSheet("background-color: #0F172A; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; color: #F8FAFC;")
+        self.contact_search.textChanged.connect(self.filter_contacts_list)
+        l_layout.addWidget(self.contact_search)
+
+        # Папки каналов и чатов (Telegram Folders)
+        folder_layout = QHBoxLayout()
+        folder_layout.setSpacing(4)
+        self.btn_folder_all = QPushButton("Все", self)
+        self.btn_folder_channels = QPushButton("📢 Каналы", self)
+        self.btn_folder_engineers = QPushButton("🔧 ТО", self)
+        self.btn_folder_dispatchers = QPushButton("👮 Дисп", self)
+
+        self.contact_folder_filter = "all"
+        self.folder_buttons_map = [
+            ("all", self.btn_folder_all),
+            ("channels", self.btn_folder_channels),
+            ("engineers", self.btn_folder_engineers),
+            ("dispatchers", self.btn_folder_dispatchers),
+        ]
+
+        def set_folder(f_name):
+            self.contact_folder_filter = f_name
+            for key, btn in self.folder_buttons_map:
+                if key == f_name:
+                    btn.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; border-radius: 4px; padding: 4px 6px; font-size: 11px;")
+                else:
+                    btn.setStyleSheet("background-color: #1E293B; color: #94A3B8; border: 1px solid #334155; border-radius: 4px; padding: 4px 6px; font-size: 11px;")
+            self.filter_contacts_list(self.contact_search.text())
+
+        for key, btn in self.folder_buttons_map:
+            btn.clicked.connect(lambda _, k=key: set_folder(k))
+            folder_layout.addWidget(btn)
 
         self.rooms_list = QListWidget(self)
         self.rooms_list.itemClicked.connect(self.on_room_clicked)
         l_layout.addWidget(self.rooms_list)
+
+        set_folder("all")
 
         splitter.addWidget(left_panel)
 
@@ -348,23 +390,31 @@ class MainWindow(QMainWindow):
         right_panel = QFrame(self)
         r_layout = QVBoxLayout(right_panel)
 
-        # Панель вызова (Walkie-Talkie Bar)
+        # Панель вызова и поиск в переписке (Walkie-Talkie Bar)
         call_bar = QFrame(self)
         call_bar.setStyleSheet("background-color: #0F172A; border: 1px solid #1E293B; border-radius: 6px; padding: 6px;")
         cb_layout = QHBoxLayout(call_bar)
 
-        self.chat_title_label = QLabel("Общий канал смены", self)
+        self.chat_title_label = QLabel("📢 Общий канал смены", self)
         self.chat_title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #38BDF8;")
         cb_layout.addWidget(self.chat_title_label)
 
         self.chat_current_user_label = QLabel("Вы: Не авторизован", self)
-        self.chat_current_user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px; margin-left: 12px;")
+        self.chat_current_user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px; margin-left: 8px;")
         cb_layout.addWidget(self.chat_current_user_label)
 
         cb_layout.addStretch()
 
+        # Поиск сообщений в текущей переписке
+        self.msg_search_input = QLineEdit(self)
+        self.msg_search_input.setPlaceholderText("🔍 Поиск в чате...")
+        self.msg_search_input.setFixedWidth(160)
+        self.msg_search_input.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 6px; padding: 4px 8px; color: #F8FAFC; font-size: 11px;")
+        self.msg_search_input.textChanged.connect(self.on_message_search_changed)
+        cb_layout.addWidget(self.msg_search_input)
+
         self.call_status_label = QLabel("Связь свободна", self)
-        self.call_status_label.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        self.call_status_label.setStyleSheet("color: #94A3B8; font-size: 12px; margin-left: 6px;")
         cb_layout.addWidget(self.call_status_label)
 
         self.call_btn = QPushButton("📞 Голосовой вызов", self)
@@ -610,11 +660,13 @@ class MainWindow(QMainWindow):
     def open_registration_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Регистрация нового инженера")
-        dialog.setFixedWidth(420)
+        dialog.setFixedWidth(440)
         d_layout = QFormLayout(dialog)
 
         name_in = QLineEdit(dialog)
         name_in.setPlaceholderText("Иванов Иван Иванович")
+        username_in = QLineEdit(dialog)
+        username_in.setPlaceholderText("ivanov_to (латинские буквы, цифры, _)")
         email_in = QLineEdit(dialog)
         email_in.setPlaceholderText("engineer@oto.ru")
         pass_in = QLineEdit(dialog)
@@ -630,6 +682,7 @@ class MainWindow(QMainWindow):
         types_in = QLineEdit("A320, B737", dialog)
 
         d_layout.addRow("ФИО инженера:", name_in)
+        d_layout.addRow("Позывной (@юзернейм):", username_in)
         d_layout.addRow("Email:", email_in)
         d_layout.addRow("Пароль:", pass_in)
         d_layout.addRow("Квалификация:", qual_combo)
@@ -645,6 +698,7 @@ class MainWindow(QMainWindow):
 
         if dialog.exec():
             name = name_in.text().strip()
+            uname = username_in.text().strip().lstrip("@")
             email = email_in.text().strip()
             pwd = pass_in.text().strip()
             qual = qual_combo.currentText()
@@ -653,8 +707,8 @@ class MainWindow(QMainWindow):
 
             if name and email and pwd:
                 try:
-                    self.client.register_engineer(name, email, pwd, qual, types, base)
-                    QMessageBox.information(self, "Заявка отправлена", f"Заявка на регистрацию {name} создана и ожидает допуска.")
+                    self.client.register_engineer(name, email, pwd, qual, types, base, uname or None)
+                    QMessageBox.information(self, "Заявка отправлена", f"Заявка на регистрацию {name} (@{uname or 'auto'}) создана и ожидает допуска.")
                 except Exception as e:
                     QMessageBox.warning(self, "Ошибка", f"Не удалось зарегистрировать: {e}")
 
@@ -733,25 +787,70 @@ class MainWindow(QMainWindow):
     # ---------- ЧАТ, МЕДИА И ГОЛОСОВЫЕ СООБЩЕНИЯ (ГС) ----------
     def refresh_contacts(self):
         try:
-            self.rooms_list.clear()
-            item_shift = QListWidgetItem("📢 Общий канал смены")
-            item_shift.setData(Qt.ItemDataRole.UserRole, ("shift", None, "Общий канал смены"))
-            self.rooms_list.addItem(item_shift)
-
-            contacts = self.client.get_contacts()
-            for c in contacts:
-                cid = c.get("id")
-                cname = c.get("name", "Инженер")
-                on_shift = c.get("on_shift", True)
-                status_dot = "🟢" if on_shift else "⚪"
-                item = QListWidgetItem(f"{status_dot} {cname}")
-                item.setData(Qt.ItemDataRole.UserRole, ("direct", cid, cname))
-                self.rooms_list.addItem(item)
+            self.raw_contacts = self.client.get_contacts()
+            current_q = self.contact_search.text() if hasattr(self, "contact_search") else ""
+            self.filter_contacts_list(current_q)
         except Exception:
             pass
 
+    def filter_contacts_list(self, query: str = ""):
+        self.rooms_list.clear()
+        q = (query or "").strip().lower().lstrip("@")
+        folder = getattr(self, "contact_folder_filter", "all")
+
+        # 1. Общий канал смены (отображается во 'Все' и 'Каналы')
+        if folder in ("all", "channels"):
+            if not q or any(x in q for x in ("смен", "общ", "канал", "shift", "all")):
+                item_shift = QListWidgetItem("📢 Общий канал смены")
+                item_shift.setData(Qt.ItemDataRole.UserRole, ("shift", None, "Общий канал смены"))
+                item_shift.setToolTip("Оперативный эфир смены (видят все диспетчеры и инженеры)")
+                self.rooms_list.addItem(item_shift)
+
+        if folder == "channels":
+            return
+
+        # 2. Список сотрудников
+        for c in getattr(self, "raw_contacts", []):
+            cid = c.get("id")
+            cname = c.get("name", "Сотрудник")
+            uname = c.get("username", f"user{cid}")
+            role = c.get("role", "engineer")
+            qual = c.get("qual") or ("Диспетчер" if role == "dispatcher" else "ТО")
+            on_shift = c.get("on_shift", True)
+            bio = c.get("bio", "")
+
+            # Фильтрация по папкам
+            if folder == "engineers" and role != "engineer":
+                continue
+            if folder == "dispatchers" and role != "dispatcher":
+                continue
+
+            if q:
+                match = (
+                    q in uname.lower()
+                    or q in cname.lower()
+                    or q in qual.lower()
+                    or q in bio.lower()
+                    or (role == "dispatcher" and any(x in q for x in ("дисп", "disp")))
+                    or (role == "engineer" and any(x in q for x in ("инж", "тех", "то", "eng")))
+                )
+                if not match:
+                    continue
+
+            status_dot = "🟢" if on_shift else "⚪"
+            role_icon = "👮" if role == "dispatcher" else "🔧"
+            title_str = f"{status_dot} {role_icon} {cname} (@{uname})"
+            item = QListWidgetItem(title_str)
+            item.setData(Qt.ItemDataRole.UserRole, ("direct", cid, f"{cname} (@{uname})"))
+            bio_line = f"\nО себе: {bio}" if bio else ""
+            item.setToolTip(f"{cname} (@{uname})\nРоль: {qual}{bio_line}\nСмена: {'На смене' if on_shift else 'Смена завершена'}")
+            self.rooms_list.addItem(item)
+
     def on_room_clicked(self, item: QListWidgetItem):
-        kind, peer_id, name = item.data(Qt.ItemDataRole.UserRole)
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        kind, peer_id, name = data
         self.active_room_kind = kind
         self.active_peer_id = peer_id
         self.active_peer_name = name
@@ -761,40 +860,118 @@ class MainWindow(QMainWindow):
 
     def load_chat_history(self):
         try:
-            history = self.client.get_chat_history(self.active_room_kind, self.active_peer_id)
-            self.chat_history_edit.clear()
-            for m in history:
-                self.append_message_html(m)
+            self.active_chat_messages = self.client.get_chat_history(self.active_room_kind, self.active_peer_id)
+            current_filter = self.msg_search_input.text() if hasattr(self, "msg_search_input") else ""
+            self.render_messages(current_filter)
         except Exception as e:
             self.chat_history_edit.setPlainText(f"Не удалось загрузить историю: {e}")
 
+    def on_message_search_changed(self, text: str):
+        self.render_messages(text.strip().lower())
+
+    def render_messages(self, search_query: str = ""):
+        self.chat_history_edit.clear()
+        messages = getattr(self, "active_chat_messages", [])
+        if search_query:
+            messages = [
+                m for m in messages
+                if search_query in (m.get("body") or "").lower()
+                or search_query in (m.get("sender_name") or "").lower()
+                or search_query in (m.get("sender_username") or "").lower()
+                or search_query in (m.get("media_name") or "").lower()
+            ]
+
+        for m in messages:
+            self.append_message_html(m)
+
+        # Автоматическая прокрутка к последнему сообщению
+        cursor = self.chat_history_edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.chat_history_edit.setTextCursor(cursor)
+
     def append_message_html(self, m: Dict[str, Any]):
         sender = m.get("sender_name", "Сотрудник")
+        sender_uname = m.get("sender_username") or m.get("username") or ""
         body = m.get("body", "")
         time_str = m.get("created_at", "")[:19].replace("T", " ")
+        if len(time_str) >= 16:
+            time_str = time_str[11:16]  # hh:mm
+
         media_url = m.get("media_url")
         media_type = m.get("media_type")
         media_name = m.get("media_name", "файл")
         duration = m.get("duration")
 
         is_me = self.current_user and m.get("sender_id") == self.current_user.get("id")
-        name_color = "#10B981" if is_me else "#38BDF8"
 
-        media_html = ""
         full_url = f"{self.client.base_url}{media_url}" if media_url and not media_url.startswith("http") else media_url
 
+        media_html = ""
         if media_type == "image" and full_url:
-            media_html = f"<div style='margin-top:6px;'><a href='{full_url}'><img src='{full_url}' width='260' style='border-radius:6px; border:1px solid #334155;'></a><br><small style='color:#94A3B8;'>{media_name}</small></div>"
+            media_html = f"""<div style='margin-top:6px;'>
+                <a href='{full_url}'><img src='{full_url}' width='260' style='border-radius:8px; border:1px solid #334155;'></a><br>
+                <small style='color:#94A3B8;'>🖼 {media_name}</small>
+            </div>"""
         elif media_type == "audio_voice" and full_url:
-            dur_str = f"{duration} сек." if duration else "Голосовое сообщение"
-            media_html = f"<div style='margin-top:6px; background-color:#1E293B; padding:6px 10px; border-radius:6px; display:inline-block;'><b style='color:#A855F7;'>🎙 {dur_str}</b> &nbsp; <a href='play:{full_url}' style='color:#38BDF8; font-weight:bold; text-decoration:none;'>▶ Прослушать</a></div>"
+            dur_str = f"{duration} сек." if duration else "Аудио"
+            media_html = f"""<div style='margin-top:6px; background-color:#0F172A; border:1px solid #38BDF8; padding:6px 12px; border-radius:8px; display:inline-block;'>
+                <b style='color:#38BDF8;'>🎙 Голосовое сообщение ({dur_str})</b> &nbsp; 
+                <a href='play:{full_url}' style='background-color:#2563EB; color:white; padding:3px 10px; border-radius:4px; text-decoration:none; font-weight:bold;'>▶ Прослушать</a>
+            </div>"""
         elif media_url:
-            media_html = f"<div style='margin-top:6px;'><a href='{full_url}' style='color:#38BDF8; text-decoration:underline;'>📄 Скачать: {media_name}</a></div>"
+            media_html = f"""<div style='margin-top:6px; background-color:#0F172A; border:1px solid #475569; padding:6px 12px; border-radius:8px; display:inline-block;'>
+                <b style='color:#E2E8F0;'>📎 {media_name}</b> &nbsp; 
+                <a href='{full_url}' style='color:#38BDF8; text-decoration:underline; font-weight:bold;'>[Скачать]</a>
+            </div>"""
 
-        body_html = f"<div>{body}</div>" if body else ""
+        body_html = f"<div style='font-size:13px; line-height:1.4; margin-top:2px;'>{body}</div>" if body else ""
+        uname_tag = f"<span style='color:#94A3B8; font-size:11px; margin-left:4px;'>@{sender_uname}</span>" if sender_uname else ""
 
-        html = f"<div style='margin-bottom:10px;'><b style='color:{name_color}; font-size:12px;'>{sender}</b> <span style='color:#64748B; font-size:10px;'>[{time_str}]</span>{body_html}{media_html}</div>"
-        self.chat_history_edit.append(html)
+        if is_me:
+            # Моё сообщение (справа, Telegram синий #2B5278)
+            bubble = f"""
+            <table width='100%' border='0' cellpadding='0' cellspacing='0' style='margin:4px 0;'>
+              <tr>
+                <td width='25%'></td>
+                <td width='75%' align='right'>
+                  <div style='background-color:#2B5278; border:1px solid #3E6E9B; border-radius:14px 14px 3px 14px; padding:8px 14px; text-align:left; display:inline-block; max-width:88%; box-shadow: 0 2px 5px rgba(0,0,0,0.25);'>
+                    <div style='margin-bottom:3px;'>
+                      <b style='color:#A6D4FF; font-size:11px;'>Вы</b>
+                      {uname_tag}
+                      <span style='color:#7EAEE2; font-size:10px; margin-left:8px;'>{time_str} ✓✓</span>
+                    </div>
+                    {body_html}
+                    {media_html}
+                  </div>
+                </td>
+              </tr>
+            </table>
+            """
+        else:
+            # Входящее сообщение (слева, Telegram карточка #182533)
+            initials = "".join([part[:1].upper() for part in sender.split()[:2]]) or "СП"
+            avatar_col = m.get("avatar_color") or "#2AABEE"
+            bubble = f"""
+            <table width='100%' border='0' cellpadding='0' cellspacing='0' style='margin:4px 0;'>
+              <tr>
+                <td width='75%' align='left'>
+                  <div style='background-color:#182533; border:1px solid #233446; border-radius:14px 14px 14px 3px; padding:8px 14px; text-align:left; display:inline-block; max-width:88%; box-shadow: 0 2px 5px rgba(0,0,0,0.25);'>
+                    <div style='margin-bottom:3px;'>
+                      <span style='background:{avatar_col}; color:white; border-radius:10px; padding:2px 7px; font-weight:bold; font-size:10px;'>{initials}</span>
+                      <b style='color:#64B5F6; font-size:11px; margin-left:6px;'>{sender}</b>
+                      {uname_tag}
+                      <span style='color:#708499; font-size:10px; margin-left:8px;'>{time_str}</span>
+                    </div>
+                    {body_html}
+                    {media_html}
+                  </div>
+                </td>
+                <td width='25%'></td>
+              </tr>
+            </table>
+            """
+
+        self.chat_history_edit.append(bubble)
 
     def on_chat_link_clicked(self, url: QUrl):
         url_str = url.toString()
@@ -824,12 +1001,17 @@ class MainWindow(QMainWindow):
             self.client.send_chat_message(text, self.active_room_kind, self.active_peer_id)
             now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
             my_name = self.current_user.get("name", "Пользователь") if self.current_user else "Пользователь"
+            my_uname = self.current_user.get("username", "") if self.current_user else ""
             msg_dict = {
                 "sender_name": my_name,
+                "sender_username": my_uname,
                 "sender_id": self.current_user.get("id") if self.current_user else 0,
                 "body": text,
                 "created_at": now_str,
             }
+            if not hasattr(self, "active_chat_messages"):
+                self.active_chat_messages = []
+            self.active_chat_messages.append(msg_dict)
             self.append_message_html(msg_dict)
             self.chat_input.clear()
         except Exception as e:
@@ -934,6 +1116,11 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "Ошибка отправки ГС", f"Не удалось отправить голосовое сообщение: {e}")
 
     def on_chat_message_received(self, msg: Dict[str, Any]):
+        if self.settings.value("sound_alert", True, type=bool):
+            QApplication.beep()
+        if not hasattr(self, "active_chat_messages"):
+            self.active_chat_messages = []
+        self.active_chat_messages.append(msg)
         self.append_message_html(msg)
 
     # ---------- ГОЛОСОВЫЕ ВЫЗОВЫ (Walkie-Talkie / Звонки) ----------
@@ -1105,19 +1292,30 @@ class MainWindow(QMainWindow):
 
         dialog.exec()
 
+    def refresh_user_badge(self):
+        if not self.current_user:
+            self.user_label.setText("Не авторизован")
+            self.user_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
+            return
+        u = self.current_user
+        name = u.get("name", "Пользователь")
+        uname = u.get("username", "")
+        role = u.get("role", "dispatcher")
+        qual = u.get("qual", "ТО")
+        role_ru = "Диспетчер" if role == "dispatcher" else f"Инженер ({qual})"
+        uname_badge = f" (@{uname})" if uname else ""
+        self.user_label.setText(f"👤 {name}{uname_badge} · {role_ru} (🟢 В сети)")
+        self.user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 12px;")
+        if hasattr(self, "chat_current_user_label"):
+            self.chat_current_user_label.setText(f"Вы: {name}{uname_badge} ({role_ru})")
+
     def connect_to_server(self, url: str, email: str, password: str):
         self.client.set_base_url(url)
         self.voice.set_base_url(url)
         try:
             login_data = self.client.login(email, password)
             self.current_user = login_data.get("user")
-            role_ru = "Диспетчер" if self.current_user.get("role") == "dispatcher" else f"Инженер ({self.current_user.get('qual', 'ТО')})"
-            user_name = self.current_user.get("name", "Пользователь")
-            self.user_label.setText(f"👤 {user_name} · {role_ru} (🟢 Онлайн)")
-            self.user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 12px;")
-
-            if hasattr(self, "chat_current_user_label"):
-                self.chat_current_user_label.setText(f"Вы: {user_name} ({role_ru})")
+            self.refresh_user_badge()
 
             airport_data = self.client.get_airport()
             self.airport_data = airport_data
@@ -1128,51 +1326,156 @@ class MainWindow(QMainWindow):
             self.load_chat_history()
             self.update_profile_tab_ui()
 
-            self.statusBar().showMessage(f"Успешное подключение к {url} под именем {user_name}")
+            u_name = self.current_user.get("name", "Пользователь")
+            self.statusBar().showMessage(f"Успешное подключение к {url} под именем {u_name}")
         except Exception as e:
             self.user_label.setText("Ошибка авторизации")
             self.user_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
             raise e
 
-    # ---------- ВКЛАДКА: ПРОФИЛЬ И НАСТРОЙКИ ----------
+    # ---------- ВКЛАДКА: ПРОФИЛЬ И НАСТРОЙКИ (TELEGRAM STYLE) ----------
     def init_settings_tab(self):
         layout = QVBoxLayout(self.tab_settings)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
 
-        # 1. Профиль
-        profile_group = QGroupBox("Учётная запись и Профиль", self.tab_settings)
-        p_layout = QFormLayout(profile_group)
-        p_layout.setContentsMargins(16, 16, 16, 16)
-        p_layout.setSpacing(10)
+        # 1. Профиль Telegram
+        profile_group = QGroupBox("👤 Профиль сотрудника (Telegram Style)", self.tab_settings)
+        p_vbox = QVBoxLayout(profile_group)
+        p_vbox.setContentsMargins(18, 18, 18, 18)
+        p_vbox.setSpacing(14)
 
-        self.prof_name_label = QLabel("—", profile_group)
-        self.prof_email_label = QLabel("—", profile_group)
-        self.prof_role_label = QLabel("—", profile_group)
-        self.prof_qual_label = QLabel("—", profile_group)
-        self.prof_tech_id_label = QLabel("—", profile_group)
-        self.prof_shift_status_label = QLabel("—", profile_group)
+        # Карточка профиля с большим аватаром
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(16)
 
-        for lbl in (self.prof_name_label, self.prof_email_label, self.prof_role_label,
-                    self.prof_qual_label, self.prof_tech_id_label, self.prof_shift_status_label):
+        self.tg_avatar_preview = QLabel("ТО", profile_group)
+        self.tg_avatar_preview.setFixedSize(76, 76)
+        self.tg_avatar_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_avatar_color = "#2AABEE"
+        self.tg_avatar_preview.setStyleSheet(
+            f"background-color: {self.current_avatar_color}; color: white; font-size: 26px; font-weight: bold; border-radius: 38px; border: 2px solid #5288c1;"
+        )
+        header_layout.addWidget(self.tg_avatar_preview)
+
+        meta_vbox = QVBoxLayout()
+        meta_vbox.setSpacing(4)
+        self.tg_user_title = QLabel("Пользователь", profile_group)
+        self.tg_user_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #F8FAFC;")
+        self.tg_user_subtitle = QLabel("@username · 🟢 в сети", profile_group)
+        self.tg_user_subtitle.setStyleSheet("font-size: 13px; color: #38BDF8; font-weight: 500;")
+        self.tg_user_bio_preview = QLabel("О себе: —", profile_group)
+        self.tg_user_bio_preview.setStyleSheet("font-size: 12px; color: #94A3B8; font-style: italic;")
+        meta_vbox.addWidget(self.tg_user_title)
+        meta_vbox.addWidget(self.tg_user_subtitle)
+        meta_vbox.addWidget(self.tg_user_bio_preview)
+        header_layout.addLayout(meta_vbox)
+        header_layout.addStretch()
+        p_vbox.addLayout(header_layout)
+
+        # Выбор цвета аватара
+        color_row = QHBoxLayout()
+        color_label = QLabel("Цвет аватара:", profile_group)
+        color_label.setStyleSheet("color: #94A3B8; font-size: 12px; font-weight: bold;")
+        color_row.addWidget(color_label)
+
+        palette = [
+            ("#2AABEE", "Голубой"),
+            ("#8E85EE", "Фиолетовый"),
+            ("#45B9A5", "Бирюзовый"),
+            ("#E57373", "Красный"),
+            ("#F39C12", "Оранжевый"),
+        ]
+        self.color_buttons = []
+        for col, col_name in palette:
+            btn_c = QPushButton(profile_group)
+            btn_c.setFixedSize(28, 28)
+            btn_c.setToolTip(col_name)
+            btn_c.setStyleSheet(f"background-color: {col}; border-radius: 14px; border: 2px solid #1E293B;")
+            btn_c.clicked.connect(lambda _, c=col: self.set_avatar_color_choice(c))
+            color_row.addWidget(btn_c)
+            self.color_buttons.append((col, btn_c))
+        color_row.addStretch()
+        p_vbox.addLayout(color_row)
+
+        # Форма редактирования данных
+        form_grid = QFormLayout()
+        form_grid.setSpacing(10)
+
+        # ФИО
+        self.prof_name_edit = QLineEdit(profile_group)
+        self.prof_name_edit.setPlaceholderText("Фамилия Имя Отчество")
+        self.prof_name_edit.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 6px; padding: 7px 10px; color: #F8FAFC;")
+        form_grid.addRow("ФИО сотрудника:", self.prof_name_edit)
+
+        # @username
+        uname_box = QHBoxLayout()
+        uname_prefix = QLabel("@", profile_group)
+        uname_prefix.setStyleSheet("font-weight: bold; font-size: 14px; color: #38BDF8;")
+        self.prof_uname_edit = QLineEdit(profile_group)
+        self.prof_uname_edit.setPlaceholderText("позывной_латиницей")
+        self.prof_uname_edit.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 6px; padding: 7px 10px; color: #F8FAFC;")
+        uname_box.addWidget(uname_prefix)
+        uname_box.addWidget(self.prof_uname_edit)
+        form_grid.addRow("Позывной (@юзернейм):", uname_box)
+
+        # Bio / О себе
+        self.prof_bio_edit = QLineEdit(profile_group)
+        self.prof_bio_edit.setPlaceholderText("Например: Диспетчер смены перрона Шереметьево · Смена №2")
+        self.prof_bio_edit.setStyleSheet("background-color: #1E293B; border: 1px solid #334155; border-radius: 6px; padding: 7px 10px; color: #F8FAFC;")
+        form_grid.addRow("О себе (Bio / Статус):", self.prof_bio_edit)
+
+        p_vbox.addLayout(form_grid)
+
+        # Кнопка сохранения профиля
+        self.btn_save_full_profile = QPushButton("💾 Сохранить изменения профиля", profile_group)
+        self.btn_save_full_profile.setStyleSheet("background-color: #2AABEE; color: white; font-weight: bold; font-size: 13px; padding: 10px; border-radius: 6px;")
+        self.btn_save_full_profile.clicked.connect(self.save_full_profile_action)
+        p_vbox.addWidget(self.btn_save_full_profile)
+
+        # Системные данные
+        info_group = QGroupBox("📋 Данные сотрудника и смена", profile_group)
+        i_layout = QFormLayout(info_group)
+        self.prof_email_label = QLabel("—", info_group)
+        self.prof_role_label = QLabel("—", info_group)
+        self.prof_qual_label = QLabel("—", info_group)
+        self.prof_tech_id_label = QLabel("—", info_group)
+        self.prof_shift_status_label = QLabel("—", info_group)
+        for lbl in (self.prof_email_label, self.prof_role_label, self.prof_qual_label, self.prof_tech_id_label, self.prof_shift_status_label):
             lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+        i_layout.addRow("Email:", self.prof_email_label)
+        i_layout.addRow("Роль в системе:", self.prof_role_label)
+        i_layout.addRow("Квалификация / Допуски:", self.prof_qual_label)
+        i_layout.addRow("Табельный номер (Tech ID):", self.prof_tech_id_label)
+        i_layout.addRow("Статус на смене:", self.prof_shift_status_label)
 
-        p_layout.addRow("ФИО / Юзернейм:", self.prof_name_label)
-        p_layout.addRow("Email:", self.prof_email_label)
-        p_layout.addRow("Роль в системе:", self.prof_role_label)
-        p_layout.addRow("Квалификация:", self.prof_qual_label)
-        p_layout.addRow("Табельный номер (Tech ID):", self.prof_tech_id_label)
-        p_layout.addRow("Статус смены:", self.prof_shift_status_label)
-
-        self.btn_toggle_my_shift = QPushButton("Выйти на смену / Завершить смену", profile_group)
+        self.btn_toggle_my_shift = QPushButton("Выйти на смену / Завершить смену", info_group)
         self.btn_toggle_my_shift.setStyleSheet("background-color: #1E293B; border: 1px solid #10B981; color: #10B981; font-weight: bold; padding: 6px 12px;")
         self.btn_toggle_my_shift.clicked.connect(self.toggle_my_shift_action)
-        p_layout.addRow("Управление сменой:", self.btn_toggle_my_shift)
+        i_layout.addRow("Управление сменой:", self.btn_toggle_my_shift)
+        p_vbox.addWidget(info_group)
 
         layout.addWidget(profile_group)
 
-        # 2. Сеть
-        net_group = QGroupBox("Параметры сервера RampPulse", self.tab_settings)
+        # 2. Звук и Уведомления
+        sound_group = QGroupBox("🔔 Звуковые оповещения и Аудио", self.tab_settings)
+        s_layout = QFormLayout(sound_group)
+        s_layout.setContentsMargins(16, 16, 16, 16)
+        s_layout.setSpacing(10)
+
+        self.sound_alert_cb = QCheckBox("Звуковой сигнал при входящем сообщении в чате", sound_group)
+        self.sound_alert_cb.setChecked(self.settings.value("sound_alert", True, type=bool))
+        self.sound_alert_cb.toggled.connect(lambda v: self.settings.setValue("sound_alert", v))
+
+        test_sound_btn = QPushButton("🔊 Проверить звук уведомления", sound_group)
+        test_sound_btn.clicked.connect(lambda: QApplication.beep())
+
+        s_layout.addRow("Уведомления:", self.sound_alert_cb)
+        s_layout.addRow("Тест аудио:", test_sound_btn)
+        layout.addWidget(sound_group)
+
+        # 3. Сеть и VPS сервер
+        net_group = QGroupBox("🌐 Параметры сервера RampPulse VPS", self.tab_settings)
         n_layout = QFormLayout(net_group)
         n_layout.setContentsMargins(16, 16, 16, 16)
         n_layout.setSpacing(10)
@@ -1185,13 +1488,18 @@ class MainWindow(QMainWindow):
         n_layout.addRow("Адрес сервера VPS:", self.net_url_label)
         n_layout.addRow("Связь в реальном времени:", self.net_status_label)
 
-        btn_reconnect = QPushButton("Сменить сервер / Авторизоваться", net_group)
+        net_actions = QHBoxLayout()
+        btn_ping = QPushButton("⚡ Проверить связь (Ping / RTT)", net_group)
+        btn_ping.clicked.connect(self.ping_server_action)
+        btn_reconnect = QPushButton("🔄 Сменить сервер / Войти", net_group)
         btn_reconnect.clicked.connect(self.open_login_dialog)
-        n_layout.addRow("Действие:", btn_reconnect)
+        net_actions.addWidget(btn_ping)
+        net_actions.addWidget(btn_reconnect)
+        n_layout.addRow("Действия:", net_actions)
 
         layout.addWidget(net_group)
 
-        # 3. Выход
+        # 4. Выход
         btn_logout = QPushButton("🚪 Выйти из учётной записи (Сменить пользователя)", self.tab_settings)
         btn_logout.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold; padding: 10px; border-radius: 6px;")
         btn_logout.clicked.connect(self.logout_action)
@@ -1199,9 +1507,41 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+    def set_avatar_color_choice(self, col: str):
+        self.current_avatar_color = col
+        self.tg_avatar_preview.setStyleSheet(
+            f"background-color: {col}; color: white; font-size: 26px; font-weight: bold; border-radius: 38px; border: 2px solid white;"
+        )
+        for c, btn in getattr(self, "color_buttons", []):
+            if c == col:
+                btn.setStyleSheet(f"background-color: {c}; border-radius: 14px; border: 2px solid white;")
+            else:
+                btn.setStyleSheet(f"background-color: {c}; border-radius: 14px; border: 2px solid #1E293B;")
+
     def update_profile_tab_ui(self):
         u = self.current_user or {}
-        self.prof_name_label.setText(u.get("name", "—"))
+        name = u.get("name", "Пользователь")
+        uname = u.get("username", "")
+        bio = u.get("bio", "")
+        col = u.get("avatar_color") or "#2AABEE"
+        self.current_avatar_color = col
+
+        initials = "".join([p[:1].upper() for p in name.split()[:2]]) or "ТО"
+        if hasattr(self, "tg_avatar_preview"):
+            self.tg_avatar_preview.setText(initials)
+            self.tg_avatar_preview.setStyleSheet(f"background-color: {col}; color: white; font-size: 26px; font-weight: bold; border-radius: 38px; border: 2px solid #5288c1;")
+        if hasattr(self, "tg_user_title"):
+            self.tg_user_title.setText(name)
+        if hasattr(self, "tg_user_subtitle"):
+            self.tg_user_subtitle.setText(f"@{uname} · 🟢 в сети" if uname else "🟢 в сети")
+        if hasattr(self, "tg_user_bio_preview"):
+            self.tg_user_bio_preview.setText(f"О себе: {bio}" if bio else "О себе: —")
+
+        self.prof_name_edit.setText(name)
+        self.prof_uname_edit.setText(uname)
+        if hasattr(self, "prof_bio_edit"):
+            self.prof_bio_edit.setText(bio)
+
         self.prof_email_label.setText(u.get("email", "—"))
         role_ru = "Диспетчер смены" if u.get("role") == "dispatcher" else "Инженер ТО"
         self.prof_role_label.setText(role_ru)
@@ -1213,6 +1553,48 @@ class MainWindow(QMainWindow):
         self.net_status_label.setText("● Подключен к VPS" if self.client.is_connected else "● Офлайн")
         self.net_status_label.setStyleSheet("color: #10B981; font-weight: bold;" if self.client.is_connected else "color: #EF4444; font-weight: bold;")
 
+    def save_full_profile_action(self):
+        new_name = self.prof_name_edit.text().strip()
+        new_uname = self.prof_uname_edit.text().strip().lstrip("@")
+        new_bio = self.prof_bio_edit.text().strip() if hasattr(self, "prof_bio_edit") else ""
+        col = getattr(self, "current_avatar_color", "#2AABEE")
+        if not new_name:
+            QMessageBox.warning(self, "Ошибка", "Укажите ФИО сотрудника.")
+            return
+        if not new_uname:
+            QMessageBox.warning(self, "Ошибка", "Укажите позывной (@юзернейм).")
+            return
+        try:
+            res = self.client.update_profile(username=new_uname, name=new_name, bio=new_bio, avatar_color=col)
+            if "user" in res:
+                self.current_user = res["user"]
+            self.update_profile_tab_ui()
+            self.refresh_user_badge()
+            self.refresh_contacts()
+            QMessageBox.information(self, "Профиль обновлён", f"✅ Профиль успешно сохранён!\nФИО: {new_name}\nПозывной: @{new_uname}\nО себе: {new_bio or '—'}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка обновления", f"Не удалось обновить профиль:\n{e}")
+
+    def save_username_action(self):
+        self.save_full_profile_action()
+
+    def save_name_action(self):
+        self.save_full_profile_action()
+
+    def ping_server_action(self):
+        start = time.time()
+        try:
+            resp = self.client.session.get(f"{self.client.base_url}/healthz", timeout=5)
+            rtt_ms = int((time.time() - start) * 1000)
+            if resp.ok:
+                data = resp.json()
+                ap = data.get("airport", "SVO")
+                QMessageBox.information(self, "Проверка связи", f"✅ Связь с VPS в норме!\nСервер: {self.client.base_url}\nАэропорт: {ap}\nЗадержка (RTT): {rtt_ms} мс")
+            else:
+                QMessageBox.warning(self, "Ошибка связи", f"Ответ сервера: HTTP {resp.status_code}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка связи", f"Не удалось подключиться к серверу:\n{e}")
+
     def toggle_my_shift_action(self):
         if not self.current_user:
             return
@@ -1222,6 +1604,7 @@ class MainWindow(QMainWindow):
             self.client.set_shift(target)
             self.current_user["on_shift"] = target
             self.update_profile_tab_ui()
+            self.refresh_user_badge()
             status_txt = "вышли на смену" if target else "завершили смену"
             QMessageBox.information(self, "Смена", f"Вы успешно {status_txt}.")
         except Exception as e:
@@ -1232,7 +1615,6 @@ class MainWindow(QMainWindow):
         self.client.user = None
         self.current_user = None
         self.settings.setValue("auto_login", False)
-        self.user_label.setText("Не авторизован")
-        self.user_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
+        self.refresh_user_badge()
         self.update_profile_tab_ui()
         self.open_login_dialog()
