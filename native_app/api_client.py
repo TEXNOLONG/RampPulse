@@ -2,6 +2,7 @@
 Клиент для взаимодействия с VPS сервером RampPulse (REST + WebSocket).
 """
 import json
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -66,19 +67,94 @@ class RampPulseClient:
         resp.raise_for_status()
         return resp.json().get("messages", [])
 
-    def send_chat_message(self, body: str, room_kind: str, recipient_id: Optional[int] = None) -> bool:
+    def upload_media(self, file_path: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/chat/upload"
+        with open(file_path, "rb") as f:
+            filename = os.path.basename(file_path)
+            files = {"file": (filename, f)}
+            resp = self.session.post(url, files=files, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+
+    def send_chat_message(
+        self,
+        body: str,
+        room_kind: str,
+        recipient_id: Optional[int] = None,
+        media_url: Optional[str] = None,
+        media_type: Optional[str] = None,
+        media_name: Optional[str] = None,
+        duration: Optional[int] = None,
+    ) -> bool:
         url = f"{self.base_url}/api/chat/relay"
         relay_key = f"{self.user.get('id', 0)}-{int(time.time()*1000)}"
+        msg_payload = {
+            "body": body,
+            "relay_key": relay_key,
+        }
+        if media_url:
+            msg_payload["media_url"] = media_url
+            msg_payload["media_type"] = media_type or "file"
+            msg_payload["media_name"] = media_name or "файл"
+            if duration is not None:
+                msg_payload["duration"] = duration
+
         payload = {
             "room_kind": room_kind,
             "recipient_id": recipient_id,
-            "message": {
-                "body": body,
-                "relay_key": relay_key
-            }
+            "message": msg_payload,
         }
         resp = self.session.post(url, json=payload, timeout=10)
         return resp.ok
+
+    def approve_registration(self, user_id: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/registrations/{user_id}/approve"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def reject_registration(self, user_id: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/registrations/{user_id}/reject"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def register_engineer(self, name: str, email: str, password: str, qual: str, types: List[str], base: str) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/auth/register"
+        resp = self.session.post(url, json={
+            "name": name,
+            "email": email,
+            "password": password,
+            "qual": qual,
+            "types": types,
+            "base": base
+        }, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def arrive_request(self, rid: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/requests/{rid}/arrive"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def start_request(self, rid: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/requests/{rid}/start"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def resolve_request(self, rid: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/requests/{rid}/resolve"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def cancel_request(self, rid: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/requests/{rid}/cancel"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
 
     def send_call_signal(self, signal: Dict[str, Any], recipient_id: int) -> bool:
         url = f"{self.base_url}/api/calls/relay"

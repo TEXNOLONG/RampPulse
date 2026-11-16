@@ -37,16 +37,28 @@ class ChatArchive:
                 );
                 """
             )
+            for col, col_type in [
+                ("media_url", "TEXT"),
+                ("media_type", "TEXT"),
+                ("media_name", "TEXT"),
+                ("duration", "INTEGER"),
+            ]:
+                try:
+                    self.connection.execute(f"ALTER TABLE chat_archive ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass
 
     def save(self, *, relay_key: str, room_kind: str, sender_id: int, sender_name: str,
-             recipient_id: int | None, body: str, sticker: str | None) -> dict:
+             recipient_id: int | None, body: str, sticker: str | None = None,
+             media_url: str | None = None, media_type: str | None = None,
+             media_name: str | None = None, duration: int | None = None) -> dict:
         created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with self.lock, self.connection:
             self.connection.execute(
                 """INSERT OR IGNORE INTO chat_archive
-                   (relay_key,room_kind,sender_id,sender_name,recipient_id,body,sticker,created_at)
-                   VALUES(?,?,?,?,?,?,?,?)""",
-                (relay_key, room_kind, sender_id, sender_name, recipient_id, body, sticker, created_at),
+                   (relay_key,room_kind,sender_id,sender_name,recipient_id,body,sticker,media_url,media_type,media_name,duration,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (relay_key, room_kind, sender_id, sender_name, recipient_id, body, sticker, media_url, media_type, media_name, duration, created_at),
             )
             row = self.connection.execute(
                 "SELECT * FROM chat_archive WHERE relay_key=?", (relay_key,)

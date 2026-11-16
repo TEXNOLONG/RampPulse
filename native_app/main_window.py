@@ -1,16 +1,22 @@
 """
 Главное окно нативного приложения RampPulse на Qt6.
-Полностью автономный нативный GUI без браузерных движков.
+Полностью автономный нативный GUI без браузерных движков:
+- Управление сменой и заявками
+- Регистрация и подтверждение допуска инженеров
+- Полноценный чат с медиа (фото/файлы) и голосовыми сообщениями (ГС)
+- Прямая голосовая связь (Walkie-Talkie / Звонки)
 """
 import json
 import os
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
-from PySide6.QtCore import QDateTime, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QDateTime, QPointF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGraphicsView,
@@ -29,7 +35,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -37,7 +43,7 @@ from PySide6.QtWidgets import (
 from .api_client import RampPulseClient
 from .map_view import AirportMapView
 from .ui_theme import DARK_THEME_QSS
-from .voice_engine import VoiceEngine
+from .voice_engine import VoiceEngine, VoiceNotePlayer, VoiceNoteRecorder
 
 
 class MainWindow(QMainWindow):
@@ -48,11 +54,13 @@ class MainWindow(QMainWindow):
     def __init__(self, default_server: str = "http://127.0.0.1:8000"):
         super().__init__()
         self.setWindowTitle("RampPulse · Операционный центр аэропорта")
-        self.resize(1440, 900)
-        self.setMinimumSize(1024, 680)
+        self.resize(1480, 920)
+        self.setMinimumSize(1024, 700)
 
         self.client = RampPulseClient(default_server)
         self.voice = VoiceEngine(default_server)
+        self.voice_recorder = VoiceNoteRecorder(self)
+        self.voice_player = VoiceNotePlayer(self)
 
         self.current_user: Optional[Dict[str, Any]] = None
         self.active_room_kind = "shift"
@@ -60,6 +68,13 @@ class MainWindow(QMainWindow):
         self.active_peer_name: str = "Общий канал смены"
         self.active_call_id: Optional[str] = None
         self.call_start_time: float = 0.0
+
+        # Состояние записи голосового сообщения
+        self.is_recording_voice_note = False
+        self.voice_note_timer = QTimer(self)
+        self.voice_note_timer.timeout.connect(self.update_voice_note_timer)
+        self.voice_note_start_time = 0.0
+        self.temp_voice_file = os.path.join(tempfile.gettempdir(), "ramppulse_voice_note.wav")
 
         self.init_ui()
         self.setup_signals()
@@ -80,25 +95,23 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(12, 10, 12, 10)
         main_layout.setSpacing(10)
 
-        # ---------- ХЕДЕР (Верхняя панель) ----------
+        # ---------- ХЕДЕР ----------
         header = QFrame(self)
         header.setStyleSheet("background-color: #0B1120; border: 1px solid #1E293B; border-radius: 8px; padding: 6px 12px;")
         h_layout = QHBoxLayout(header)
         h_layout.setContentsMargins(8, 4, 8, 4)
 
-        # Логотип и заголовок
         title_box = QVBoxLayout()
         title_label = QLabel("RAMPPULSE · DISPATCH", self)
         title_label.setStyleSheet("font-size: 16px; font-weight: 800; color: #38BDF8; letter-spacing: 1px;")
-        sub_title = QLabel("Операционный центр диспетчеризации", self)
+        sub_title = QLabel("Центр оперативного управления и связи", self)
         sub_title.setStyleSheet("font-size: 11px; color: #94A3B8;")
         title_box.addWidget(title_label)
         title_box.addWidget(sub_title)
         h_layout.addLayout(title_box)
 
-        h_layout.addSpacing(24)
+        h_layout.addSpacing(20)
 
-        # Выбор аэропорта
         h_layout.addWidget(QLabel("Аэропорт:", self))
         self.airport_combo = QComboBox(self)
         self.airport_combo.addItems(["Шереметьево (SVO · UUEE)", "Домодедово (DME · UUDD)"])
@@ -107,24 +120,20 @@ class MainWindow(QMainWindow):
 
         h_layout.addSpacing(16)
 
-        # Статус подключения к VPS
         self.vps_indicator = QLabel("● VPS: Офлайн", self)
         self.vps_indicator.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
         h_layout.addWidget(self.vps_indicator)
 
-        # Кнопка настройки сервера / входа
         self.settings_btn = QPushButton("Настройки VPS", self)
         self.settings_btn.clicked.connect(self.open_settings_dialog)
         h_layout.addWidget(self.settings_btn)
 
         h_layout.addStretch()
 
-        # Пользователь
         self.user_label = QLabel("Не авторизован", self)
         self.user_label.setStyleSheet("color: #F8FAFC; font-weight: 600; font-size: 12px;")
         h_layout.addWidget(self.user_label)
 
-        # Часы
         self.clock_label = QLabel("00:00:00 UTC", self)
         self.clock_label.setStyleSheet("color: #38BDF8; font-family: monospace; font-size: 13px; font-weight: bold;")
         h_layout.addWidget(self.clock_label)
@@ -134,34 +143,38 @@ class MainWindow(QMainWindow):
         # ---------- ВКЛАДКИ ПРИЛОЖЕНИЯ ----------
         self.tabs = QTabWidget(self)
 
-        # Вкладка 1: Карта перрона
+        # 1. Карта перрона
         self.tab_map = QWidget()
         self.init_map_tab()
         self.tabs.addTab(self.tab_map, "Оперативная карта (2D Radar)")
 
-        # Вкладка 2: Рейсы и воздушные суда
+        # 2. Борты и рейсы
         self.tab_flights = QWidget()
         self.init_flights_tab()
         self.tabs.addTab(self.tab_flights, "Борты и рейсы")
 
-        # Вкладка 3: Инженеры и техники смены
+        # 3. Инженеры смены
         self.tab_techs = QWidget()
         self.init_techs_tab()
         self.tabs.addTab(self.tab_techs, "Инженеры смены")
 
-        # Вкладка 4: Заявки на обслуживание
+        # 4. Заявки на обслуживание
         self.tab_requests = QWidget()
         self.init_requests_tab()
         self.tabs.addTab(self.tab_requests, "Заявки на обслуживание")
 
-        # Вкладка 5: Чат и голосовая связь (Walkie-Talkie)
+        # 5. Очередь регистрации (допуск инженеров)
+        self.tab_registrations = QWidget()
+        self.init_registrations_tab()
+        self.tabs.addTab(self.tab_registrations, "Очередь допуска (Регистрация)")
+
+        # 6. Чат, медиа и голосовая связь
         self.tab_chat = QWidget()
         self.init_chat_tab()
-        self.tabs.addTab(self.tab_chat, "Связь и Чат (Рация)")
+        self.tabs.addTab(self.tab_chat, "Связь, Чат и Рация")
 
         main_layout.addWidget(self.tabs)
 
-        # Строка состояния (Status Bar)
         self.statusBar().showMessage("Готов к работе. Подключитесь к VPS серверу.")
         self.statusBar().setStyleSheet("background-color: #070B12; color: #64748B; font-size: 11px;")
 
@@ -178,12 +191,11 @@ class MainWindow(QMainWindow):
         self.voice.call_connected.connect(self.on_voice_call_connected)
         self.voice.call_ended.connect(self.on_voice_call_ended)
 
-    # ---------- ИНИЦИАЛИЗАЦИЯ ВКЛАДОК ----------
+    # ---------- ВКЛАДКИ ----------
     def init_map_tab(self):
         layout = QVBoxLayout(self.tab_map)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        # Панель инструментов карты
         toolbar = QHBoxLayout()
         btn_fit = QPushButton("Центрировать карту", self)
         btn_fit.clicked.connect(lambda: self.map_view.fit_airport())
@@ -199,7 +211,7 @@ class MainWindow(QMainWindow):
 
         toolbar.addStretch()
 
-        self.map_info_label = QLabel("Перетаскивание: ЛКМ · Масштаб: Колёсико мыши", self)
+        self.map_info_label = QLabel("ЛКМ: Перетаскивание · Колёсико: Масштаб", self)
         self.map_info_label.setStyleSheet("color: #64748B; font-size: 11px;")
         toolbar.addWidget(self.map_info_label)
 
@@ -251,11 +263,34 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_layout)
 
         self.requests_table = QTableWidget(self)
-        self.requests_table.setColumnCount(6)
-        self.requests_table.setHorizontalHeaderLabels(["ID", "Стоянка", "Неисправность", "Приоритет", "Назначенный техник", "Статус"])
+        self.requests_table.setColumnCount(7)
+        self.requests_table.setHorizontalHeaderLabels(["ID", "Стоянка", "Неисправность", "Приоритет", "Техник", "Статус", "Действие"])
         self.requests_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.requests_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         layout.addWidget(self.requests_table)
+
+    def init_registrations_tab(self):
+        layout = QVBoxLayout(self.tab_registrations)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        toolbar = QHBoxLayout()
+        btn_register_new = QPushButton("+ Зарегистрировать нового инженера", self)
+        btn_register_new.setProperty("class", "primary-btn")
+        btn_register_new.clicked.connect(self.open_registration_dialog)
+        toolbar.addWidget(btn_register_new)
+
+        self.pending_badge = QLabel("Ожидают проверки: 0", self)
+        self.pending_badge.setStyleSheet("color: #F59E0B; font-weight: bold; font-size: 13px; margin-left: 10px;")
+        toolbar.addWidget(self.pending_badge)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.registrations_table = QTableWidget(self)
+        self.registrations_table.setColumnCount(7)
+        self.registrations_table.setHorizontalHeaderLabels(["ID", "ФИО инженера", "Email", "Квалификация", "База", "Допуски ВС", "Решение диспетчера"])
+        self.registrations_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.registrations_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.registrations_table)
 
     def init_chat_tab(self):
         layout = QHBoxLayout(self.tab_chat)
@@ -275,7 +310,7 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(left_panel)
 
-        # Правая колонка: Сообщения и блок голосовой связи
+        # Правая колонка: Сообщения и панель связи
         right_panel = QFrame(self)
         r_layout = QVBoxLayout(right_panel)
 
@@ -306,12 +341,31 @@ class MainWindow(QMainWindow):
 
         r_layout.addWidget(call_bar)
 
-        # Окно сообщений
-        self.chat_history_edit = QTextEdit(self)
-        self.chat_history_edit.setReadOnly(True)
+        # Окно сообщений с кликабельными ссылками (QTextBrowser)
+        self.chat_history_edit = QTextBrowser(self)
+        self.chat_history_edit.setOpenExternalLinks(False)
+        self.chat_history_edit.anchorClicked.connect(self.on_chat_link_clicked)
         r_layout.addWidget(self.chat_history_edit)
 
-        # Поле ввода сообщения
+        # Поле ввода сообщения и медиа-кнопки
+        input_toolbar = QHBoxLayout()
+
+        self.btn_attach = QPushButton("📎 Фото / Файл", self)
+        self.btn_attach.clicked.connect(self.attach_and_send_file)
+        input_toolbar.addWidget(self.btn_attach)
+
+        self.btn_voice_note = QPushButton("🎤 Записать ГС", self)
+        self.btn_voice_note.setStyleSheet("background-color: #374151; font-weight: bold;")
+        self.btn_voice_note.clicked.connect(self.toggle_record_voice_note)
+        input_toolbar.addWidget(self.btn_voice_note)
+
+        self.voice_note_status = QLabel("", self)
+        self.voice_note_status.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 11px;")
+        input_toolbar.addWidget(self.voice_note_status)
+
+        input_toolbar.addStretch()
+        r_layout.addLayout(input_toolbar)
+
         msg_input_layout = QHBoxLayout()
         self.chat_input = QLineEdit(self)
         self.chat_input.setPlaceholderText("Напишите сообщение в канал...")
@@ -331,7 +385,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(splitter)
 
-    # ---------- ЛОГИКА СОБЫТИЙ ----------
+    # ---------- ОБНОВЛЕНИЯ СОСТОЯНИЯ ----------
     def update_clock(self):
         now = QDateTime.currentDateTimeUtc()
         self.clock_label.setText(now.toString("hh:mm:ss") + " UTC")
@@ -341,6 +395,11 @@ class MainWindow(QMainWindow):
             elapsed = int(time.time() - self.call_start_time)
             mins, secs = divmod(elapsed, 60)
             self.call_status_label.setText(f"Идёт вызов ({mins:02d}:{secs:02d})")
+
+    def update_voice_note_timer(self):
+        if self.is_recording_voice_note:
+            elapsed = int(time.time() - self.voice_note_start_time)
+            self.voice_note_status.setText(f"🔴 Идёт запись ГС: {elapsed} сек.")
 
     def on_connection_change(self, is_connected: bool):
         if is_connected:
@@ -353,10 +412,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Связь с VPS потеряна. Повторная попытка...")
 
     def on_state_received(self, state: Dict[str, Any]):
-        # Обновление карты
         self.map_view.update_state(state)
 
-        # Обновление таблицы бортов
+        # 1. Таблица бортов
         aircraft_list = state.get("aircraft", [])
         self.flights_table.setRowCount(len(aircraft_list))
         for row, ac in enumerate(aircraft_list):
@@ -365,7 +423,6 @@ class MainWindow(QMainWindow):
             self.flights_table.setItem(row, 2, QTableWidgetItem(ac.get("model", "A320")))
             self.flights_table.setItem(row, 3, QTableWidgetItem(ac.get("status", "Обслуживание")))
 
-            # Прогресс норматива
             pbar = QProgressBar()
             pbar.setValue(min(100, int(ac.get("turnaround_progress", 40))))
             self.flights_table.setCellWidget(row, 4, pbar)
@@ -375,7 +432,7 @@ class MainWindow(QMainWindow):
             btn_depart.clicked.connect(lambda _, a=aid: self.depart_aircraft(a))
             self.flights_table.setCellWidget(row, 5, btn_depart)
 
-        # Обновление таблицы техников
+        # 2. Таблица техников
         techs_list = state.get("techs", [])
         self.techs_table.setRowCount(len(techs_list))
         for row, t in enumerate(techs_list):
@@ -391,23 +448,168 @@ class MainWindow(QMainWindow):
             btn_call_tech.clicked.connect(lambda _, i=tid, n=tname: self.start_direct_call(i, n))
             self.techs_table.setCellWidget(row, 5, btn_call_tech)
 
-        # Обновление таблицы заявок
+        # 3. Таблица заявок с этапами выполнения
         requests_list = list(state.get("requests", {}).values())
         self.requests_table.setRowCount(len(requests_list))
         for row, r in enumerate(requests_list):
-            self.requests_table.setItem(row, 0, QTableWidgetItem(f"#{r.get('id', '-') }"))
-            self.requests_table.setItem(row, 1, QTableWidgetItem(f"Стоянка {r.get('stand', '-') }"))
+            rid = r.get("id")
+            r_status = r.get("status", "pending")
+            self.requests_table.setItem(row, 0, QTableWidgetItem(f"#{rid}"))
+            self.requests_table.setItem(row, 1, QTableWidgetItem(f"Стоянка {r.get('stand', '-')}"))
             self.requests_table.setItem(row, 2, QTableWidgetItem(r.get("description", "-")))
             self.requests_table.setItem(row, 3, QTableWidgetItem(r.get("priority", "normal")))
             self.requests_table.setItem(row, 4, QTableWidgetItem(r.get("tech_name", "Авто-подбор")))
-            self.requests_table.setItem(row, 5, QTableWidgetItem(r.get("status", "pending")))
+            self.requests_table.setItem(row, 5, QTableWidgetItem(r_status))
 
+            # Кнопка действия в зависимости от этапа
+            action_btn = QPushButton("Действие")
+            if r_status == "pending":
+                action_btn.setText("Отменить")
+                action_btn.setProperty("class", "danger-btn")
+                action_btn.clicked.connect(lambda _, req_id=rid: self.cancel_request_action(req_id))
+            elif r_status == "assigned":
+                action_btn.setText("Прибыл на стоянку")
+                action_btn.clicked.connect(lambda _, req_id=rid: self.arrive_request_action(req_id))
+            elif r_status == "arrived":
+                action_btn.setText("Начать работу")
+                action_btn.clicked.connect(lambda _, req_id=rid: self.start_request_action(req_id))
+            elif r_status == "working":
+                action_btn.setText("Завершить (Устранено)")
+                action_btn.setProperty("class", "success-btn")
+                action_btn.clicked.connect(lambda _, req_id=rid: self.resolve_request_action(req_id))
+            else:
+                action_btn.setText("Выполнено")
+                action_btn.setEnabled(False)
+
+            self.requests_table.setCellWidget(row, 6, action_btn)
+
+        # 4. Очередь допуска (Регистрация новых инженеров)
+        registrations = state.get("registrations", [])
+        self.pending_badge.setText(f"Ожидают проверки: {len(registrations)}")
+        self.registrations_table.setRowCount(len(registrations))
+        for row, reg in enumerate(registrations):
+            uid = reg.get("id")
+            self.registrations_table.setItem(row, 0, QTableWidgetItem(str(uid)))
+            self.registrations_table.setItem(row, 1, QTableWidgetItem(reg.get("name", "-")))
+            self.registrations_table.setItem(row, 2, QTableWidgetItem(reg.get("email", "-")))
+            self.registrations_table.setItem(row, 3, QTableWidgetItem(reg.get("qual", "-")))
+            self.registrations_table.setItem(row, 4, QTableWidgetItem(reg.get("base", "-")))
+            self.registrations_table.setItem(row, 5, QTableWidgetItem(", ".join(reg.get("types", []))))
+
+            btn_box = QWidget()
+            b_layout = QHBoxLayout(btn_box)
+            b_layout.setContentsMargins(2, 2, 2, 2)
+
+            btn_approve = QPushButton("Допустить", btn_box)
+            btn_approve.setProperty("class", "success-btn")
+            btn_approve.clicked.connect(lambda _, u=uid: self.approve_engineer_action(u))
+            b_layout.addWidget(btn_approve)
+
+            btn_reject = QPushButton("Отклонить", btn_box)
+            btn_reject.setProperty("class", "danger-btn")
+            btn_reject.clicked.connect(lambda _, u=uid: self.reject_engineer_action(u))
+            b_layout.addWidget(btn_reject)
+
+            self.registrations_table.setCellWidget(row, 6, btn_box)
+
+    # ---------- ДЕЙСТВИЯ С ЗАЯВКАМИ ----------
+    def arrive_request_action(self, rid: int):
+        try:
+            self.client.arrive_request(rid)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось отметить прибытие: {e}")
+
+    def start_request_action(self, rid: int):
+        try:
+            self.client.start_request(rid)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось начать работы: {e}")
+
+    def resolve_request_action(self, rid: int):
+        try:
+            self.client.resolve_request(rid)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось завершить заявку: {e}")
+
+    def cancel_request_action(self, rid: int):
+        try:
+            self.client.cancel_request(rid)
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось отменить заявку: {e}")
+
+    # ---------- РЕГИСТРАЦИЯ И ДОПУСК ----------
+    def approve_engineer_action(self, user_id: int):
+        try:
+            res = self.client.approve_registration(user_id)
+            QMessageBox.information(self, "Допуск подтверждён", f"Инженер {res.get('user', {}).get('name')} успешно допущен к смене!")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось допустить инженера: {e}")
+
+    def reject_engineer_action(self, user_id: int):
+        try:
+            self.client.reject_registration(user_id)
+            QMessageBox.information(self, "Отклонено", "Заявка на регистрацию отклонена.")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось отклонить заявку: {e}")
+
+    def open_registration_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Регистрация нового инженера")
+        dialog.setFixedWidth(420)
+        d_layout = QFormLayout(dialog)
+
+        name_in = QLineEdit(dialog)
+        name_in.setPlaceholderText("Иванов Иван Иванович")
+        email_in = QLineEdit(dialog)
+        email_in.setPlaceholderText("engineer@oto.ru")
+        pass_in = QLineEdit(dialog)
+        pass_in.setPlaceholderText("Минимум 8 символов")
+        pass_in.setEchoMode(QLineEdit.EchoMode.Password)
+
+        qual_combo = QComboBox(dialog)
+        qual_combo.addItems(["Планер", "Двигатель", "Авионика"])
+
+        base_combo = QComboBox(dialog)
+        base_combo.addItems(["BASE1", "BASE2", "BASE3"])
+
+        types_in = QLineEdit("A320, B737", dialog)
+
+        d_layout.addRow("ФИО инженера:", name_in)
+        d_layout.addRow("Email:", email_in)
+        d_layout.addRow("Пароль:", pass_in)
+        d_layout.addRow("Квалификация:", qual_combo)
+        d_layout.addRow("База ТО:", base_combo)
+        d_layout.addRow("Допуски ВС (через запятую):", types_in)
+
+        btn_box = QHBoxLayout()
+        btn_reg = QPushButton("Отправить заявку", dialog)
+        btn_reg.setProperty("class", "primary-btn")
+        btn_reg.clicked.connect(dialog.accept)
+        btn_box.addWidget(btn_reg)
+        d_layout.addRow(btn_box)
+
+        if dialog.exec():
+            name = name_in.text().strip()
+            email = email_in.text().strip()
+            pwd = pass_in.text().strip()
+            qual = qual_combo.currentText()
+            base = base_combo.currentText()
+            types = [t.strip() for t in types_in.text().split(",") if t.strip()]
+
+            if name and email and pwd:
+                try:
+                    self.client.register_engineer(name, email, pwd, qual, types, base)
+                    QMessageBox.information(self, "Заявка отправлена", f"Заявка на регистрацию {name} создана и ожидает допуска.")
+                except Exception as e:
+                    QMessageBox.warning(self, "Ошибка", f"Не удалось зарегистрировать: {e}")
+
+    # ---------- ДИАЛОГИ И КАРТА ----------
     def on_airport_changed(self, index: int):
         try:
             airport_data = self.client.get_airport()
             self.map_view.load_airport(airport_data)
         except Exception as e:
-            self.statusBar().showMessage(f"Ошибка загрузки карты аэропорта: {e}")
+            self.statusBar().showMessage(f"Ошибка загрузки карты: {e}")
 
     def spawn_aircraft(self):
         try:
@@ -428,9 +630,7 @@ class MainWindow(QMainWindow):
         d_layout = QFormLayout(dialog)
 
         stand_input = QLineEdit(dialog)
-        stand_input.setPlaceholderText("Например: 14 или 22")
         desc_input = QLineEdit(dialog)
-        desc_input.setPlaceholderText("Описание проблемы")
         qual_combo = QComboBox(dialog)
         qual_combo.addItems(["auto (Автоподбор)", "Планер", "Двигатель", "Авионика"])
         prio_combo = QComboBox(dialog)
@@ -460,11 +660,10 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.warning(self, "Ошибка", f"Не удалось создать заявку: {e}")
 
-    # ---------- ЧАТ И ГОЛОСОВАЯ СВЯЗЬ ----------
+    # ---------- ЧАТ, МЕДИА И ГОЛОСОВЫЕ СООБЩЕНИЯ (ГС) ----------
     def refresh_contacts(self):
         try:
             self.rooms_list.clear()
-            # Общий канал
             item_shift = QListWidgetItem("📢 Общий канал смены")
             item_shift.setData(Qt.ItemDataRole.UserRole, ("shift", None, "Общий канал смены"))
             self.rooms_list.addItem(item_shift)
@@ -495,12 +694,52 @@ class MainWindow(QMainWindow):
             history = self.client.get_chat_history(self.active_room_kind, self.active_peer_id)
             self.chat_history_edit.clear()
             for m in history:
-                sender = m.get("sender_name", "Сотрудник")
-                body = m.get("body", "")
-                time_str = m.get("created_at", "")[:19].replace("T", " ")
-                self.chat_history_edit.append(f"<b style='color:#38BDF8;'>{sender}</b> <span style='color:#64748B; font-size:10px;'>[{time_str}]</span><br>{body}<br>")
+                self.append_message_html(m)
         except Exception as e:
             self.chat_history_edit.setPlainText(f"Не удалось загрузить историю: {e}")
+
+    def append_message_html(self, m: Dict[str, Any]):
+        sender = m.get("sender_name", "Сотрудник")
+        body = m.get("body", "")
+        time_str = m.get("created_at", "")[:19].replace("T", " ")
+        media_url = m.get("media_url")
+        media_type = m.get("media_type")
+        media_name = m.get("media_name", "файл")
+        duration = m.get("duration")
+
+        is_me = self.current_user and m.get("sender_id") == self.current_user.get("id")
+        name_color = "#10B981" if is_me else "#38BDF8"
+
+        media_html = ""
+        full_url = f"{self.client.base_url}{media_url}" if media_url and not media_url.startswith("http") else media_url
+
+        if media_type == "image" and full_url:
+            media_html = f"<div style='margin-top:6px;'><a href='{full_url}'><img src='{full_url}' width='260' style='border-radius:6px; border:1px solid #334155;'></a><br><small style='color:#94A3B8;'>{media_name}</small></div>"
+        elif media_type == "audio_voice" and full_url:
+            dur_str = f"{duration} сек." if duration else "Голосовое сообщение"
+            media_html = f"<div style='margin-top:6px; background-color:#1E293B; padding:6px 10px; border-radius:6px; display:inline-block;'><b style='color:#A855F7;'>🎙 {dur_str}</b> &nbsp; <a href='play:{full_url}' style='color:#38BDF8; font-weight:bold; text-decoration:none;'>▶ Прослушать</a></div>"
+        elif media_url:
+            media_html = f"<div style='margin-top:6px;'><a href='{full_url}' style='color:#38BDF8; text-decoration:underline;'>📄 Скачать: {media_name}</a></div>"
+
+        body_html = f"<div>{body}</div>" if body else ""
+
+        html = f"<div style='margin-bottom:10px;'><b style='color:{name_color}; font-size:12px;'>{sender}</b> <span style='color:#64748B; font-size:10px;'>[{time_str}]</span>{body_html}{media_html}</div>"
+        self.chat_history_edit.append(html)
+
+    def on_chat_link_clicked(self, url: QUrl):
+        url_str = url.toString()
+        if url_str.startswith("play:"):
+            # Воспроизведение голосового сообщения (ГС)
+            audio_url = url_str[5:]
+            self.statusBar().showMessage(f"Воспроизведение аудио: {audio_url}")
+            try:
+                resp = self.client.session.get(audio_url, timeout=15)
+                if resp.ok:
+                    self.voice_player.play_wav(resp.content)
+            except Exception as e:
+                QMessageBox.warning(self, "Ошибка воспроизведения", f"Не удалось воспроизвести аудио: {e}")
+        else:
+            QDesktopServices.openUrl(url)
 
     def send_chat_message(self):
         text = self.chat_input.text().strip()
@@ -511,18 +750,110 @@ class MainWindow(QMainWindow):
             if ok:
                 now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
                 my_name = self.current_user.get("name", "Диспетчер") if self.current_user else "Диспетчер"
-                self.chat_history_edit.append(f"<b style='color:#10B981;'>{my_name}</b> <span style='color:#64748B; font-size:10px;'>[{now_str}]</span><br>{text}<br>")
+                msg_dict = {
+                    "sender_name": my_name,
+                    "sender_id": self.current_user.get("id") if self.current_user else 0,
+                    "body": text,
+                    "created_at": now_str,
+                }
+                self.append_message_html(msg_dict)
                 self.chat_input.clear()
         except Exception as e:
             QMessageBox.warning(self, "Ошибка чата", f"Не удалось отправить сообщение: {e}")
 
-    def on_chat_message_received(self, msg: Dict[str, Any]):
-        sender = msg.get("sender_name", "Собеседник")
-        body = msg.get("body", "")
-        time_str = QDateTime.currentDateTime().toString("hh:mm:ss")
-        self.chat_history_edit.append(f"<b style='color:#F59E0B;'>{sender}</b> <span style='color:#64748B; font-size:10px;'>[{time_str}]</span><br>{body}<br>")
+    def attach_and_send_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Прикрепить медиа или документ",
+            "",
+            "Все файлы (*.*);;Изображения (*.png *.jpg *.jpeg *.webp);;Аудио (*.wav *.mp3 *.ogg);;Документы (*.pdf *.docx *.txt)",
+        )
+        if not file_path:
+            return
+        try:
+            self.statusBar().showMessage("Загрузка файла на VPS...")
+            upload_res = self.client.upload_media(file_path)
+            media_url = upload_res.get("url")
+            media_type = upload_res.get("media_type")
+            media_name = upload_res.get("media_name")
 
-    # ---------- ГОЛОСОВЫЕ ВЫЗОВЫ (Walkie-Talkie) ----------
+            self.client.send_chat_message(
+                body="",
+                room_kind=self.active_room_kind,
+                recipient_id=self.active_peer_id,
+                media_url=media_url,
+                media_type=media_type,
+                media_name=media_name,
+            )
+            now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
+            my_name = self.current_user.get("name", "Диспетчер") if self.current_user else "Диспетчер"
+            self.append_message_html({
+                "sender_name": my_name,
+                "sender_id": self.current_user.get("id") if self.current_user else 0,
+                "body": "",
+                "created_at": now_str,
+                "media_url": media_url,
+                "media_type": media_type,
+                "media_name": media_name,
+            })
+            self.statusBar().showMessage("Файл успешно отправлен в чат.")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка загрузки", f"Не удалось отправить файл: {e}")
+
+    def toggle_record_voice_note(self):
+        if not self.is_recording_voice_note:
+            # Старт записи ГС
+            self.is_recording_voice_note = True
+            self.voice_note_start_time = time.time()
+            self.voice_recorder.start_recording(self.temp_voice_file)
+            self.btn_voice_note.setText("⏹ Отправить ГС")
+            self.btn_voice_note.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold;")
+            self.voice_note_timer.start(500)
+            self.statusBar().showMessage("Запись голосового сообщения...")
+        else:
+            # Остановка записи и отправка
+            self.is_recording_voice_note = False
+            self.voice_note_timer.stop()
+            self.voice_note_status.setText("")
+            self.btn_voice_note.setText("🎤 Записать ГС")
+            self.btn_voice_note.setStyleSheet("background-color: #374151; font-weight: bold;")
+
+            out_path, duration = self.voice_recorder.stop_recording()
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 100:
+                try:
+                    self.statusBar().showMessage("Отправка ГС на сервер...")
+                    upload_res = self.client.upload_media(out_path)
+                    media_url = upload_res.get("url")
+
+                    self.client.send_chat_message(
+                        body="",
+                        room_kind=self.active_room_kind,
+                        recipient_id=self.active_peer_id,
+                        media_url=media_url,
+                        media_type="audio_voice",
+                        media_name=f"Голосовое сообщение ({duration}с)",
+                        duration=duration,
+                    )
+                    now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
+                    my_name = self.current_user.get("name", "Диспетчер") if self.current_user else "Диспетчер"
+                    self.append_message_html({
+                        "sender_name": my_name,
+                        "sender_id": self.current_user.get("id") if self.current_user else 0,
+                        "body": "",
+                        "created_at": now_str,
+                        "media_url": media_url,
+                        "media_type": "audio_voice",
+                        "media_name": f"Голосовое сообщение ({duration}с)",
+                        "duration": duration,
+                    })
+                    self.statusBar().showMessage("Голосовое сообщение отправлено.")
+                except Exception as e:
+                    QMessageBox.warning(self, "Ошибка отправки ГС", f"Не удалось отправить голосовое сообщение: {e}")
+
+    def on_chat_message_received(self, msg: Dict[str, Any]):
+        self.append_message_html(msg)
+
+    # ---------- ГОЛОСОВЫЕ ВЫЗОВЫ (Walkie-Talkie / Звонки) ----------
     def start_direct_call(self, peer_id: int, peer_name: str):
         self.tabs.setCurrentWidget(self.tab_chat)
         self.active_room_kind = "direct"
@@ -533,7 +864,6 @@ class MainWindow(QMainWindow):
 
     def toggle_voice_call(self):
         if self.voice.is_in_call:
-            # Завершение вызова
             self.voice.end_call()
             if self.active_peer_id:
                 self.client.send_call_signal({"kind": "hangup"}, self.active_peer_id)
@@ -543,16 +873,14 @@ class MainWindow(QMainWindow):
             self.mute_btn.setEnabled(False)
             self.call_timer.stop()
         else:
-            # Начало вызова
             if not self.active_peer_id:
-                QMessageBox.information(self, "Голосовая связь", "Выберите конкретного сотрудника из списка для голосового вызова.")
+                QMessageBox.information(self, "Голосовая связь", "Выберите сотрудника из списка для голосового вызова.")
                 return
             call_id = f"call_{min(self.client.user.get('id', 1), self.active_peer_id)}_{max(self.client.user.get('id', 1), self.active_peer_id)}"
             self.active_call_id = call_id
             self.voice.set_base_url(self.client.base_url)
             self.voice.start_call(call_id, self.client.token or "")
 
-            # Отправка сигнала звонка собеседнику
             self.client.send_call_signal({"kind": "ring", "call_id": call_id}, self.active_peer_id)
 
             self.call_btn.setText("📴 Завершить звонок")
@@ -604,7 +932,7 @@ class MainWindow(QMainWindow):
                 self.call_timer.start(1000)
             elif from_id:
                 self.client.send_call_signal({"kind": "decline"}, from_id)
-        elif kind == "hangup" or kind == "decline":
+        elif kind in ("hangup", "decline"):
             self.voice.end_call()
             self.on_voice_call_ended()
 
@@ -624,7 +952,7 @@ class MainWindow(QMainWindow):
         d_layout.addRow("Email диспетчера:", email_input)
         d_layout.addRow("Пароль:", pass_input)
 
-        hint = QLabel("Подсказка: для теста на локальной машине используйте http://127.0.0.1:8000\nДля вашего сервера укажите http://IP_ВАШЕГО_VPS или домен.", dialog)
+        hint = QLabel("Укажите http://31.56.179.117 или локальный http://127.0.0.1:8000", dialog)
         hint.setStyleSheet("color: #64748B; font-size: 11px;")
         d_layout.addRow(hint)
 
@@ -649,14 +977,10 @@ class MainWindow(QMainWindow):
             self.current_user = login_data.get("user")
             self.user_label.setText(f"👤 {self.current_user.get('name', 'Диспетчер')}")
 
-            # Загрузка карты
             airport_data = self.client.get_airport()
             self.map_view.load_airport(airport_data)
 
-            # Запуск WebSocket
             self.client.start_websocket()
-
-            # Загрузка каналов
             self.refresh_contacts()
             self.load_chat_history()
 

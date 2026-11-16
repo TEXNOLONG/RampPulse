@@ -5,6 +5,7 @@
 """
 import threading
 import time
+import wave
 from typing import Optional
 from PySide6.QtCore import QByteArray, QIODevice, QObject, Signal
 from PySide6.QtMultimedia import (
@@ -128,3 +129,86 @@ class VoiceEngine(QObject):
                 pass
             self.audio_ws = None
         self.call_ended.emit()
+
+
+class VoiceNoteRecorder(QObject):
+    recording_finished = Signal(str, int)  # file_path, duration_seconds
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.is_recording = False
+        self.audio_format = QAudioFormat()
+        self.audio_format.setSampleRate(16000)
+        self.audio_format.setChannelCount(1)
+        self.audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        self.audio_source: Optional[QAudioSource] = None
+        self.io_device: Optional[QIODevice] = None
+        self.buffer = bytearray()
+        self.start_time = 0.0
+        self.temp_path: Optional[str] = None
+
+    def start_recording(self, output_path: str):
+        self.temp_path = output_path
+        self.buffer.clear()
+        self.start_time = time.time()
+        self.is_recording = True
+
+        default_input = QMediaDevices.defaultAudioInput()
+        self.audio_source = QAudioSource(default_input, self.audio_format, self)
+        self.io_device = self.audio_source.start()
+        if self.io_device:
+            self.io_device.readyRead.connect(self._on_ready_read)
+
+    def _on_ready_read(self):
+        if self.io_device and self.is_recording:
+            data = self.io_device.readAll()
+            self.buffer.extend(bytes(data))
+
+    def stop_recording(self) -> tuple[str, int]:
+        self.is_recording = False
+        duration = max(1, int(time.time() - self.start_time))
+        if self.audio_source:
+            self.audio_source.stop()
+            self.audio_source = None
+            self.io_device = None
+
+        if self.temp_path and self.buffer:
+            with wave.open(self.temp_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(self.buffer)
+
+        path = self.temp_path or ""
+        self.recording_finished.emit(path, duration)
+        return path, duration
+
+
+class VoiceNotePlayer(QObject):
+    playback_finished = Signal()
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self.audio_sink: Optional[QAudioSink] = None
+        self.io_device: Optional[QIODevice] = None
+        self.audio_format = QAudioFormat()
+        self.audio_format.setSampleRate(16000)
+        self.audio_format.setChannelCount(1)
+        self.audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+
+    def play_wav(self, file_path_or_bytes):
+        if self.audio_sink:
+            self.audio_sink.stop()
+
+        default_output = QMediaDevices.defaultAudioOutput()
+        self.audio_sink = QAudioSink(default_output, self.audio_format, self)
+
+        if isinstance(file_path_or_bytes, str):
+            with wave.open(file_path_or_bytes, "rb") as wf:
+                audio_bytes = wf.readframes(wf.getnframes())
+        else:
+            audio_bytes = file_path_or_bytes
+
+        self.io_device = self.audio_sink.start()
+        if self.io_device:
+            self.io_device.write(audio_bytes)

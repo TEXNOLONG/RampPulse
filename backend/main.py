@@ -3,10 +3,11 @@ import asyncio
 import json
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -29,6 +30,8 @@ TECHS_FILE = Path(os.environ.get("TECHS_FILE", ROOT / "data" / "technicians.json
 DB_FILE = os.environ.get("DB_FILE", str(ROOT / "dispatch.db"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 DEMO_MODE = os.environ.get("DEMO_MODE", "1").lower() not in ("0", "false", "no", "off")
+UPLOAD_DIR = ROOT / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 airport = json.loads(AIRPORT_FILE.read_text(encoding="utf-8"))
 techs_cfg = json.loads(TECHS_FILE.read_text(encoding="utf-8"))
@@ -366,6 +369,10 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
     message = {**body.message, "from_user_id": user["id"], "sender_name": user["name"]}
     raw_text = message.get("body") or ""
     sticker = message.get("sticker")
+    media_url = message.get("media_url")
+    media_type = message.get("media_type")
+    media_name = message.get("media_name")
+    duration = message.get("duration")
     if not isinstance(raw_text, str) or (sticker is not None and not isinstance(sticker, str)):
         raise HTTPException(400, "Некорректное сообщение")
     text = raw_text.strip()
@@ -374,8 +381,8 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
         raise HTTPException(400, "Сообщение не должно превышать 2000 символов")
     if len(sticker or "") > 48:
         raise HTTPException(400, "Недопустимый стикер")
-    if not relay_key or (not text and not sticker):
-        raise HTTPException(400, "Введите сообщение или выберите стикер")
+    if not relay_key or (not text and not sticker and not media_url):
+        raise HTTPException(400, "Введите сообщение, выберите стикер или прикрепите файл")
     archived = chat_archive.save(
         relay_key=relay_key,
         room_kind=body.room_kind,
@@ -384,6 +391,10 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
         recipient_id=body.recipient_id if body.room_kind == "direct" else None,
         body=text,
         sticker=str(sticker) if sticker else None,
+        media_url=str(media_url) if media_url else None,
+        media_type=str(media_type) if media_type else None,
+        media_name=str(media_name) if media_name else None,
+        duration=int(duration) if duration is not None else None,
     )
     message.update(archived)
     message["room_kind"] = body.room_kind
@@ -391,6 +402,28 @@ async def relay_chat(body: ChatRelayBody, user: dict = Depends(current_user)):
     for recipient_id in recipient_ids:
         await _send_to_user(recipient_id, event)
     return {"ok": True}
+
+
+@app.post("/api/chat/upload")
+async def upload_chat_media(file: UploadFile = File(...), user: dict = Depends(current_user)):
+    ext = Path(file.filename or "file").suffix.lower()
+    safe_name = f"{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}{ext}"
+    dest_path = UPLOAD_DIR / safe_name
+    content = await file.read()
+    dest_path.write_bytes(content)
+
+    media_type = "file"
+    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+        media_type = "image"
+    elif ext in {".wav", ".mp3", ".ogg", ".webm", ".m4a", ".aac"}:
+        media_type = "audio_voice"
+
+    return {
+        "url": f"/uploads/{safe_name}",
+        "media_type": media_type,
+        "media_name": file.filename or safe_name,
+        "size": len(content),
+    }
 
 
 @app.post("/api/chat/relay-read")
@@ -690,3 +723,4 @@ def healthz():
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "frontend"), name="static")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

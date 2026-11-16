@@ -77,39 +77,124 @@ window.otoBridge = {
         splash.remove();
     },
     chat: {
-        available: Boolean((_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke),
-        initialize: (userId, userName) => invokeDesktop('chat_initialize', { userId, userName }),
+        available: true,
+        initialize: async (userId, userName) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { return await invoke('chat_initialize', { userId, userName }); } catch (_) {}
+            }
+            try {
+                const res = await bridgeRequest('/api/chat/contacts');
+                const contacts = res.contacts || [];
+                const rooms = [{ id: 1, kind: 'shift', name: 'Общий канал смены', peer_name: 'Общий канал смены', unread: 0 }];
+                for (const c of contacts) {
+                    rooms.push({
+                        id: Number(c.id) + 1000,
+                        kind: 'direct',
+                        name: c.name,
+                        peer_id: c.id,
+                        peer_name: c.name,
+                        on_shift: c.on_shift,
+                        unread: 0
+                    });
+                }
+                return rooms;
+            } catch (_) {
+                return [{ id: 1, kind: 'shift', name: 'Общий канал смены', peer_name: 'Общий канал смены', unread: 0 }];
+            }
+        },
         history: (roomKind, peerId) => {
             const query = new URLSearchParams({ room_kind: roomKind });
             if (peerId !== undefined)
                 query.set('peer_id', String(peerId));
             return bridgeRequest(`/api/chat/history?${query}`);
         },
-        createDirect: (userId, peerId, userName, peerName) => invokeDesktop('chat_create_dm', { userId, peerId, userName, peerName }),
-        loadMessages: (roomId, userId) => invokeDesktop('chat_load_messages', { roomId, userId }),
-        sendMessage: args => invokeDesktop('chat_send_message', args),
-        receiveMessage: args => invokeDesktop('chat_receive_message', args),
-        markRead: (roomId, userId) => invokeDesktop('chat_mark_read', { roomId, userId }),
-        markSentRead: (relayKey, userId) => invokeDesktop('chat_mark_sent_read', { relayKey, userId }),
+        createDirect: async (userId, peerId, userName, peerName) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { return await invoke('chat_create_dm', { userId, peerId, userName, peerName }); } catch (_) {}
+            }
+            return { id: Number(peerId) + 1000, kind: 'direct', name: peerName, peer_id: peerId, peer_name: peerName };
+        },
+        loadMessages: async (roomId, userId) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { return await invoke('chat_load_messages', { roomId, userId }); } catch (_) {}
+            }
+            const isShift = Number(roomId) === 1;
+            const peerId = isShift ? undefined : Number(roomId) - 1000;
+            const res = await bridgeRequest(`/api/chat/history?room_kind=${isShift ? 'shift' : 'direct'}${peerId !== undefined ? '&peer_id=' + peerId : ''}`);
+            return res.messages || [];
+        },
+        sendMessage: async (args) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { return await invoke('chat_send_message', args); } catch (_) {}
+            }
+            return {
+                id: Date.now(),
+                room_id: args.roomId,
+                sender_id: args.userId,
+                sender_name: args.senderName,
+                body: args.body,
+                sticker: args.sticker,
+                media_url: args.media_url,
+                media_type: args.media_type,
+                media_name: args.media_name,
+                duration: args.duration,
+                relay_key: args.relayKey,
+                created_at: new Date().toISOString()
+            };
+        },
+        receiveMessage: async (args) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { return await invoke('chat_receive_message', args); } catch (_) {}
+            }
+            return args;
+        },
+        markRead: async (roomId, userId) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { await invoke('chat_mark_read', { roomId, userId }); } catch (_) {}
+            }
+        },
+        markSentRead: async (relayKey, userId) => {
+            var _a, _b, _c;
+            const invoke = (_c = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.core) === null || _b === void 0 ? void 0 : _b.invoke) === null || _c === void 0 ? void 0 : _c.bind(window.__TAURI__.core);
+            if (invoke) {
+                try { await invoke('chat_mark_sent_read', { relayKey, userId }); } catch (_) {}
+            }
+        },
         listen: async (handler) => {
             var _a, _b;
             const listen = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.event) === null || _b === void 0 ? void 0 : _b.listen;
-            if (!listen)
-                return () => { };
-            return listen('chat-message', event => {
-                if (!event.payload || typeof event.payload !== 'object')
-                    return;
-                const message = event.payload;
-                handler(message, message.room_kind === 'direct' ? 'direct' : 'shift', Number(message.sender_id));
-            });
+            if (listen) {
+                return listen('chat-message', event => {
+                    if (!event.payload || typeof event.payload !== 'object')
+                        return;
+                    const message = event.payload;
+                    handler(message, message.room_kind === 'direct' ? 'direct' : 'shift', Number(message.sender_id));
+                });
+            }
+            return () => {};
         },
         listenCalls: async (handler) => {
             var _a, _b;
             const listen = (_b = (_a = window.__TAURI__) === null || _a === void 0 ? void 0 : _a.event) === null || _b === void 0 ? void 0 : _b.listen;
-            if (!listen)
-                return () => { };
-            return listen('call-signal', event => { if (event.payload && typeof event.payload === 'object')
-                handler(event.payload); });
+            if (listen) {
+                return listen('call-signal', event => {
+                    if (event.payload && typeof event.payload === 'object')
+                        handler(event.payload);
+                });
+            }
+            return () => {};
         },
         relay: async (message, roomKind, recipientId) => {
             await bridgeRequest('/api/chat/relay', { method: 'POST', body: JSON.stringify({ message, room_kind: roomKind, recipient_id: recipientId }) });

@@ -54,10 +54,20 @@
     container.innerHTML = messages.map(message => {
       const own = Number(message.sender_id) === Number(identity.id);
       const sticker = message.sticker ? stickerHtml(message.sticker, true) : '';
+      let mediaHtml = '';
+      if (message.media_url) {
+        if (message.media_type === 'image') {
+          mediaHtml = `<div class="chat-media-wrap"><a href="${esc(message.media_url)}" target="_blank"><img src="${esc(message.media_url)}" class="chat-media-img" alt="${esc(message.media_name||'Фото')}"/></a></div>`;
+        } else if (message.media_type === 'audio_voice') {
+          mediaHtml = `<div class="chat-voice-wrap"><audio controls src="${esc(message.media_url)}" class="chat-voice-audio"></audio><span class="chat-voice-label">🎙 ${esc(message.media_name || 'Голосовое сообщение')}</span></div>`;
+        } else {
+          mediaHtml = `<div class="chat-file-wrap"><a href="${esc(message.media_url)}" download="${esc(message.media_name||'файл')}" class="chat-file-link" target="_blank">📄 ${esc(message.media_name || 'Скачать файл')}</a></div>`;
+        }
+      }
       const key = keyFor(message);
       const status = pendingMessages.has(key) ? 'Отправка…' : failedMessages.has(key) ? 'Не доставлено' : message.read ? 'Прочитано' : 'Отправлено';
       const retry = own && failedMessages.has(key) ? `<button class="chat-retry" type="button" data-retry-message="${esc(key)}">Повторить</button>` : '';
-      return `<article class="chat-message ${own ? 'own' : ''} ${failedMessages.has(key) ? 'delivery-failed' : ''}" data-message-key="${esc(key)}"><div class="chat-message-top"><b>${own ? 'Вы' : esc(message.sender_name || 'Участник')}</b><time>${esc(timeLabel(message.created_at))}</time></div>${message.body ? `<p>${esc(message.body)}</p>` : ''}${sticker}<div class="chat-message-meta">${own ? status : 'Смена'}${retry}</div></article>`;
+      return `<article class="chat-message ${own ? 'own' : ''} ${failedMessages.has(key) ? 'delivery-failed' : ''}" data-message-key="${esc(key)}"><div class="chat-message-top"><b>${own ? 'Вы' : esc(message.sender_name || 'Участник')}</b><time>${esc(timeLabel(message.created_at))}</time></div>${message.body ? `<p>${esc(message.body)}</p>` : ''}${sticker}${mediaHtml}<div class="chat-message-meta">${own ? status : 'Смена'}${retry}</div></article>`;
     }).join('');
     container.scrollTop = container.scrollHeight;
   }
@@ -152,11 +162,22 @@
     clearTimeout(toastIncoming.timer);
     toastIncoming.timer = setTimeout(() => { node.hidden = true; }, 3600);
   }
-  async function send(body = '', sticker = null) {
-    if (!selectedRoom || (!body.trim() && !sticker)) return;
+  async function send(body = '', sticker = null, media = null) {
+    if (!selectedRoom || (!body.trim() && !sticker && !media)) return;
     const targetRoom = {...selectedRoom};
     const relayKey = crypto.randomUUID ? crypto.randomUUID() : `${identity.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const args = {roomId:Number(targetRoom.id),userId:Number(identity.id),senderName:identity.name,body:body.trim(),sticker,relayKey};
+    const args = {
+      roomId: Number(targetRoom.id),
+      userId: Number(identity.id),
+      senderName: identity.name,
+      body: body.trim(),
+      sticker,
+      relayKey,
+      media_url: media?.url || null,
+      media_type: media?.type || null,
+      media_name: media?.name || null,
+      duration: media?.duration || null
+    };
     pendingMessages.add(relayKey);
     let message;
     try {
@@ -374,6 +395,69 @@
     });
     $('#chatInput').addEventListener('input', event => { const field = event.currentTarget; field.style.height='auto'; field.style.height=`${Math.min(field.scrollHeight,112)}px`; });
     $('#chatStickerToggle').addEventListener('click', () => { $('#stickerPicker').hidden = !$('#stickerPicker').hidden; });
+    const fileBtn = $('#chatFileBtn');
+    const fileInput = $('#chatFileInput');
+    if (fileBtn && fileInput) {
+      fileBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async event => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        try {
+          const form = new FormData();
+          form.append('file', file);
+          const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
+          if (!res.ok) throw new Error('Ошибка загрузки файла');
+          const data = await res.json();
+          await send('', null, { url: data.url, type: data.media_type, name: data.media_name });
+          fileInput.value = '';
+        } catch (err) {
+          toastIncoming('Файл не отправлен', window.otoBridge.errorMessage(err));
+        }
+      });
+    }
+
+    const voiceBtn = $('#chatVoiceBtn');
+    let mediaRecorder = null;
+    let voiceChunks = [];
+    let voiceStart = 0;
+    if (voiceBtn) {
+      voiceBtn.addEventListener('click', async () => {
+        if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            voiceChunks = [];
+            voiceStart = Date.now();
+            mediaRecorder = new MediaRecorder(stream);
+            mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
+            mediaRecorder.onstop = async () => {
+              stream.getTracks().forEach(t => t.stop());
+              const blob = new Blob(voiceChunks, { type: 'audio/webm' });
+              const duration = Math.max(1, Math.round((Date.now() - voiceStart) / 1000));
+              try {
+                const form = new FormData();
+                form.append('file', blob, 'voice_note.webm');
+                const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
+                if (!res.ok) throw new Error('Ошибка загрузки ГС');
+                const data = await res.json();
+                await send('', null, { url: data.url, type: 'audio_voice', name: `Голосовое сообщение (${duration}с)`, duration });
+              } catch (err) {
+                toastIncoming('ГС не отправлено', window.otoBridge.errorMessage(err));
+              }
+            };
+            mediaRecorder.start();
+            voiceBtn.style.color = '#ef4444';
+            voiceBtn.title = 'Остановить запись';
+            toastIncoming('Голосовое сообщение', 'Идёт запись... Нажмите ещё раз для отправки');
+          } catch (err) {
+            toastIncoming('Микрофон недоступен', window.otoBridge.errorMessage(err));
+          }
+        } else {
+          mediaRecorder.stop();
+          voiceBtn.style.color = '';
+          voiceBtn.title = 'Голосовое сообщение';
+        }
+      });
+    }
     $('#stickerPicker').addEventListener('click', event => { const button = event.target.closest('[data-sticker]'); if (button) send('', button.dataset.sticker).catch(error => toastIncoming('Стикер не отправлен', window.otoBridge.errorMessage(error))); });
     $('#chatCall').addEventListener('click', () => startCall().catch(error => toastIncoming('Не удалось позвонить', window.otoBridge.errorMessage(error))));
     $('#callAnswer').addEventListener('click', () => acceptCall());
