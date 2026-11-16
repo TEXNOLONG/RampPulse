@@ -203,12 +203,22 @@ class VoiceNotePlayer(QObject):
         default_output = QMediaDevices.defaultAudioOutput()
         self.audio_sink = QAudioSink(default_output, self.audio_format, self)
 
+        audio_bytes = b""
         if isinstance(file_path_or_bytes, str):
-            with wave.open(file_path_or_bytes, "rb") as wf:
-                audio_bytes = wf.readframes(wf.getnframes())
-        else:
-            audio_bytes = file_path_or_bytes
+            try:
+                with wave.open(file_path_or_bytes, "rb") as wf:
+                    audio_bytes = wf.readframes(wf.getnframes())
+            except Exception:
+                with open(file_path_or_bytes, "rb") as f:
+                    audio_bytes = f.read()
+        elif isinstance(file_path_or_bytes, (bytes, bytearray)):
+            import io
+            try:
+                with wave.open(io.BytesIO(file_path_or_bytes), "rb") as wf:
+                    audio_bytes = wf.readframes(wf.getnframes())
+            except Exception:
+                audio_bytes = bytes(file_path_or_bytes)
 
         self.io_device = self.audio_sink.start()
-        if self.io_device:
+        if self.io_device and audio_bytes:
             self.io_device.write(audio_bytes)

@@ -133,25 +133,41 @@ class RampPulseClient:
         return resp.json()
 
     def arrive_request(self, rid: int) -> Dict[str, Any]:
-        url = f"{self.base_url}/api/requests/{rid}/arrive"
+        if self.user and self.user.get("role") == "engineer":
+            url = f"{self.base_url}/api/engineer/requests/{rid}/arrive"
+        else:
+            url = f"{self.base_url}/api/requests/{rid}/arrive"
         resp = self.session.post(url, timeout=10)
         resp.raise_for_status()
         return resp.json()
 
     def start_request(self, rid: int) -> Dict[str, Any]:
-        url = f"{self.base_url}/api/requests/{rid}/start"
+        if self.user and self.user.get("role") == "engineer":
+            url = f"{self.base_url}/api/engineer/requests/{rid}/start"
+        else:
+            url = f"{self.base_url}/api/requests/{rid}/start"
         resp = self.session.post(url, timeout=10)
         resp.raise_for_status()
         return resp.json()
 
     def resolve_request(self, rid: int) -> Dict[str, Any]:
-        url = f"{self.base_url}/api/requests/{rid}/resolve"
+        if self.user and self.user.get("role") == "engineer":
+            url = f"{self.base_url}/api/engineer/requests/{rid}/resolve"
+        else:
+            url = f"{self.base_url}/api/requests/{rid}/resolve"
         resp = self.session.post(url, timeout=10)
         resp.raise_for_status()
         return resp.json()
 
     def cancel_request(self, rid: int) -> Dict[str, Any]:
         url = f"{self.base_url}/api/requests/{rid}/cancel"
+        resp = self.session.post(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+
+    def set_shift(self, start: bool) -> Dict[str, Any]:
+        endpoint = "start" if start else "end"
+        url = f"{self.base_url}/api/engineer/shift/{endpoint}"
         resp = self.session.post(url, timeout=10)
         resp.raise_for_status()
         return resp.json()

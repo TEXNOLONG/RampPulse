@@ -453,21 +453,32 @@ class MainWindow(QMainWindow):
         self.requests_table.setRowCount(len(requests_list))
         for row, r in enumerate(requests_list):
             rid = r.get("id")
-            r_status = r.get("status", "pending")
+            r_status = r.get("status", "waiting")
             self.requests_table.setItem(row, 0, QTableWidgetItem(f"#{rid}"))
             self.requests_table.setItem(row, 1, QTableWidgetItem(f"Стоянка {r.get('stand', '-')}"))
             self.requests_table.setItem(row, 2, QTableWidgetItem(r.get("description", "-")))
             self.requests_table.setItem(row, 3, QTableWidgetItem(r.get("priority", "normal")))
             self.requests_table.setItem(row, 4, QTableWidgetItem(r.get("tech_name", "Авто-подбор")))
-            self.requests_table.setItem(row, 5, QTableWidgetItem(r_status))
+
+            status_text = {
+                "waiting": "Ожидает назначения",
+                "pending": "Ожидает назначения",
+                "enroute": "В пути к стоянке",
+                "assigned": "В пути к стоянке",
+                "arrived": "Инженер на месте",
+                "working": "Выполняются работы",
+                "done": "Дефект устранён",
+                "cancelled": "Отменена"
+            }.get(r_status, r_status)
+            self.requests_table.setItem(row, 5, QTableWidgetItem(status_text))
 
             # Кнопка действия в зависимости от этапа
             action_btn = QPushButton("Действие")
-            if r_status == "pending":
+            if r_status in ("waiting", "pending"):
                 action_btn.setText("Отменить")
                 action_btn.setProperty("class", "danger-btn")
                 action_btn.clicked.connect(lambda _, req_id=rid: self.cancel_request_action(req_id))
-            elif r_status == "assigned":
+            elif r_status in ("enroute", "assigned"):
                 action_btn.setText("Прибыл на стоянку")
                 action_btn.clicked.connect(lambda _, req_id=rid: self.arrive_request_action(req_id))
             elif r_status == "arrived":
@@ -477,6 +488,12 @@ class MainWindow(QMainWindow):
                 action_btn.setText("Завершить (Устранено)")
                 action_btn.setProperty("class", "success-btn")
                 action_btn.clicked.connect(lambda _, req_id=rid: self.resolve_request_action(req_id))
+            elif r_status == "done":
+                action_btn.setText("Устранено ✓")
+                action_btn.setEnabled(False)
+            elif r_status == "cancelled":
+                action_btn.setText("Отменена")
+                action_btn.setEnabled(False)
             else:
                 action_btn.setText("Выполнено")
                 action_btn.setEnabled(False)
@@ -607,6 +624,7 @@ class MainWindow(QMainWindow):
     def on_airport_changed(self, index: int):
         try:
             airport_data = self.client.get_airport()
+            self.airport_data = airport_data
             self.map_view.load_airport(airport_data)
         except Exception as e:
             self.statusBar().showMessage(f"Ошибка загрузки карты: {e}")
@@ -626,18 +644,32 @@ class MainWindow(QMainWindow):
     def open_new_request_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Новая заявка на обслуживание")
-        dialog.setFixedWidth(400)
+        dialog.setFixedWidth(440)
         d_layout = QFormLayout(dialog)
 
-        stand_input = QLineEdit(dialog)
+        # Выпадающий список со стоянками и бортами аэропорта
+        stand_combo = QComboBox(dialog)
+        stand_combo.setEditable(True)
+        available_stands = []
+        if hasattr(self, "airport_data") and self.airport_data:
+            stands = self.airport_data.get("stands", [])
+            for s in stands:
+                sid = s.get("id") if isinstance(s, dict) else str(s)
+                if sid and sid not in available_stands:
+                    available_stands.append(sid)
+        if not available_stands:
+            available_stands = [f"ВС-{i:02d}" for i in range(1, 25)]
+        stand_combo.addItems(available_stands)
+
         desc_input = QLineEdit(dialog)
+        desc_input.setPlaceholderText("Опишите дефект, например: отказ гидросистемы")
         qual_combo = QComboBox(dialog)
         qual_combo.addItems(["auto (Автоподбор)", "Планер", "Двигатель", "Авионика"])
         prio_combo = QComboBox(dialog)
         prio_combo.addItems(["normal (Обычный)", "emergency (ЧС / Норматив 15м)"])
 
-        d_layout.addRow("Стоянка:", stand_input)
-        d_layout.addRow("Проблема:", desc_input)
+        d_layout.addRow("Стоянка ВС:", stand_combo)
+        d_layout.addRow("Описание дефекта:", desc_input)
         d_layout.addRow("Квалификация:", qual_combo)
         d_layout.addRow("Приоритет:", prio_combo)
 
@@ -649,7 +681,7 @@ class MainWindow(QMainWindow):
         d_layout.addRow(btn_box)
 
         if dialog.exec():
-            stand = stand_input.text().strip()
+            stand = stand_combo.currentText().strip()
             desc = desc_input.text().strip()
             qual = qual_combo.currentText().split()[0]
             prio = prio_combo.currentText().split()[0]
@@ -975,9 +1007,11 @@ class MainWindow(QMainWindow):
         try:
             login_data = self.client.login(email, password)
             self.current_user = login_data.get("user")
-            self.user_label.setText(f"👤 {self.current_user.get('name', 'Диспетчер')}")
+            role_ru = "Диспетчер" if self.current_user.get("role") == "dispatcher" else f"Инженер ({self.current_user.get('qual', 'ТО')})"
+            self.user_label.setText(f"👤 {self.current_user.get('name', 'Сотрудник')} · {role_ru}")
 
             airport_data = self.client.get_airport()
+            self.airport_data = airport_data
             self.map_view.load_airport(airport_data)
 
             self.client.start_websocket()
