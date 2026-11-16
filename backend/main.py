@@ -65,7 +65,14 @@ clients: dict[WebSocket, dict] = {}
 
 # ---------- авторизация ----------
 def _cookie_user(request: Request) -> dict | None:
-    return auth.user_for_token(request.cookies.get(SESSION_COOKIE))
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token = auth_hdr[7:].strip()
+        elif not token:
+            token = request.query_params.get("token")
+    return auth.user_for_token(token)
 
 
 def current_user(request: Request) -> dict:
@@ -264,6 +271,7 @@ def login(body: LoginBody, response: Response):
     )
     return {
         "user": user,
+        "token": token,
         "redirect": "/" if user["role"] == "dispatcher" else "/engineer",
     }
 
@@ -575,10 +583,18 @@ async def reject_registration(user_id: int, _: dict = Depends(dispatcher_only)):
 
 
 # ---------- WebSocket ----------
+voice_rooms: dict[str, set[WebSocket]] = {}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
-    user = auth.user_for_token(ws.cookies.get(SESSION_COOKIE))
+    token = ws.cookies.get(SESSION_COOKIE) or ws.query_params.get("token")
+    if not token:
+        auth_hdr = ws.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token = auth_hdr[7:].strip()
+    user = auth.user_for_token(token)
     if not user:
         await ws.close(code=4401)
         return
@@ -591,6 +607,47 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         clients.pop(ws, None)
+
+
+@app.websocket("/ws/voice/{call_id}")
+async def ws_voice(ws: WebSocket, call_id: str):
+    await ws.accept()
+    token = ws.cookies.get(SESSION_COOKIE) or ws.query_params.get("token")
+    if not token:
+        auth_hdr = ws.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token = auth_hdr[7:].strip()
+    user = auth.user_for_token(token)
+    if not user:
+        await ws.close(code=4401)
+        return
+    room = voice_rooms.setdefault(call_id, set())
+    room.add(ws)
+    try:
+        while True:
+            message = await ws.receive()
+            if "bytes" in message and message["bytes"]:
+                chunk = message["bytes"]
+                for peer in list(room):
+                    if peer != ws:
+                        try:
+                            await peer.send_bytes(chunk)
+                        except Exception:
+                            room.discard(peer)
+            elif "text" in message and message["text"]:
+                text_data = message["text"]
+                for peer in list(room):
+                    if peer != ws:
+                        try:
+                            await peer.send_text(text_data)
+                        except Exception:
+                            room.discard(peer)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        room.discard(ws)
+        if not room:
+            voice_rooms.pop(call_id, None)
 
 
 # ---------- страницы ----------
