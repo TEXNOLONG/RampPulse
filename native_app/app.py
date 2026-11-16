@@ -21,7 +21,7 @@ def main():
     app.setOrganizationName("RampPulse")
     app.setStyleSheet(DARK_THEME_QSS)
 
-    server_url = "http://127.0.0.1:8000"
+    server_url = "http://31.56.179.117"
     if len(sys.argv) > 1 and sys.argv[1].startswith("http"):
         server_url = sys.argv[1]
 

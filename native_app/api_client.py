@@ -86,8 +86,12 @@ class RampPulseClient:
         media_name: Optional[str] = None,
         duration: Optional[int] = None,
     ) -> bool:
+        if not self.token or not self.user:
+            raise RuntimeError("Вы не авторизованы. Сначала подключитесь к серверу и выполните вход.")
+
         url = f"{self.base_url}/api/chat/relay"
-        relay_key = f"{self.user.get('id', 0)}-{int(time.time()*1000)}"
+        user_id = self.user.get('id', 0) if isinstance(self.user, dict) else 0
+        relay_key = f"{user_id}-{int(time.time()*1000)}"
         msg_payload = {
             "body": body,
             "relay_key": relay_key,
@@ -105,7 +109,13 @@ class RampPulseClient:
             "message": msg_payload,
         }
         resp = self.session.post(url, json=payload, timeout=10)
-        return resp.ok
+        if not resp.ok:
+            try:
+                err = resp.json().get("detail", resp.text)
+            except Exception:
+                err = resp.text
+            raise RuntimeError(f"Ошибка сервера ({resp.status_code}): {err}")
+        return True
 
     def approve_registration(self, user_id: int) -> Dict[str, Any]:
         url = f"{self.base_url}/api/registrations/{user_id}/approve"

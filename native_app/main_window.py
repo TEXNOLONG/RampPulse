@@ -11,7 +11,7 @@ import os
 import tempfile
 import time
 from typing import Any, Dict, List, Optional
-from PySide6.QtCore import QDateTime, QPointF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QDateTime, QPointF, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -51,18 +51,23 @@ class MainWindow(QMainWindow):
     chat_received = Signal(dict)
     call_signal_received = Signal(dict)
 
-    def __init__(self, default_server: str = "http://127.0.0.1:8000"):
+    def __init__(self, default_server: str = "http://31.56.179.117"):
         super().__init__()
         self.setWindowTitle("RampPulse · Операционный центр аэропорта")
         self.resize(1480, 920)
         self.setMinimumSize(1024, 700)
 
-        self.client = RampPulseClient(default_server)
-        self.voice = VoiceEngine(default_server)
+        self.settings = QSettings("RampPulse", "RampPulse")
+        saved_server = self.settings.value("server_url", default_server)
+
+        self.client = RampPulseClient(saved_server)
+        self.voice = VoiceEngine(saved_server)
         self.voice_recorder = VoiceNoteRecorder(self)
         self.voice_player = VoiceNotePlayer(self)
 
         self.current_user: Optional[Dict[str, Any]] = None
+        self.has_shown_login = False
+        self.airport_data: Optional[Dict[str, Any]] = None
         self.active_room_kind = "shift"
         self.active_peer_id: Optional[int] = None
         self.active_peer_name: str = "Общий канал смены"
@@ -124,14 +129,18 @@ class MainWindow(QMainWindow):
         self.vps_indicator.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
         h_layout.addWidget(self.vps_indicator)
 
-        self.settings_btn = QPushButton("Настройки VPS", self)
-        self.settings_btn.clicked.connect(self.open_settings_dialog)
+        self.settings_btn = QPushButton("⚙️ Настройки и Профиль", self)
+        self.settings_btn.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_settings))
         h_layout.addWidget(self.settings_btn)
+
+        self.login_btn = QPushButton("🔑 Сменить пользователя", self)
+        self.login_btn.clicked.connect(self.open_login_dialog)
+        h_layout.addWidget(self.login_btn)
 
         h_layout.addStretch()
 
         self.user_label = QLabel("Не авторизован", self)
-        self.user_label.setStyleSheet("color: #F8FAFC; font-weight: 600; font-size: 12px;")
+        self.user_label.setStyleSheet("color: #EF4444; font-weight: 600; font-size: 12px;")
         h_layout.addWidget(self.user_label)
 
         self.clock_label = QLabel("00:00:00 UTC", self)
@@ -173,6 +182,11 @@ class MainWindow(QMainWindow):
         self.init_chat_tab()
         self.tabs.addTab(self.tab_chat, "Связь, Чат и Рация")
 
+        # 7. Профиль и настройки
+        self.tab_settings = QWidget()
+        self.init_settings_tab()
+        self.tabs.addTab(self.tab_settings, "⚙️ Профиль и Настройки")
+
         main_layout.addWidget(self.tabs)
 
         self.statusBar().showMessage("Готов к работе. Подключитесь к VPS серверу.")
@@ -190,6 +204,26 @@ class MainWindow(QMainWindow):
 
         self.voice.call_connected.connect(self.on_voice_call_connected)
         self.voice.call_ended.connect(self.on_voice_call_ended)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self.has_shown_login:
+            self.has_shown_login = True
+            QTimer.singleShot(100, self.auto_login_or_prompt)
+
+    def auto_login_or_prompt(self):
+        saved_server = self.settings.value("server_url", "http://31.56.179.117")
+        saved_email = self.settings.value("email", "dispatcher@oto.ru")
+        saved_pwd = self.settings.value("password", "Dispatcher2026!")
+        auto_login = self.settings.value("auto_login", True, type=bool)
+
+        if auto_login and saved_server and saved_email and saved_pwd:
+            try:
+                self.connect_to_server(saved_server, saved_email, saved_pwd)
+                return
+            except Exception:
+                pass
+        self.open_login_dialog()
 
     # ---------- ВКЛАДКИ ----------
     def init_map_tab(self):
@@ -322,6 +356,10 @@ class MainWindow(QMainWindow):
         self.chat_title_label = QLabel("Общий канал смены", self)
         self.chat_title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #38BDF8;")
         cb_layout.addWidget(self.chat_title_label)
+
+        self.chat_current_user_label = QLabel("Вы: Не авторизован", self)
+        self.chat_current_user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 11px; margin-left: 12px;")
+        cb_layout.addWidget(self.chat_current_user_label)
 
         cb_layout.addStretch()
 
@@ -774,26 +812,35 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(url)
 
     def send_chat_message(self):
+        if not self.client.token:
+            QMessageBox.warning(self, "Авторизация", "Вы не авторизованы. Сначала подключитесь к серверу и выполните вход.")
+            self.open_login_dialog()
+            return
+
         text = self.chat_input.text().strip()
         if not text:
             return
         try:
-            ok = self.client.send_chat_message(text, self.active_room_kind, self.active_peer_id)
-            if ok:
-                now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
-                my_name = self.current_user.get("name", "Диспетчер") if self.current_user else "Диспетчер"
-                msg_dict = {
-                    "sender_name": my_name,
-                    "sender_id": self.current_user.get("id") if self.current_user else 0,
-                    "body": text,
-                    "created_at": now_str,
-                }
-                self.append_message_html(msg_dict)
-                self.chat_input.clear()
+            self.client.send_chat_message(text, self.active_room_kind, self.active_peer_id)
+            now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
+            my_name = self.current_user.get("name", "Пользователь") if self.current_user else "Пользователь"
+            msg_dict = {
+                "sender_name": my_name,
+                "sender_id": self.current_user.get("id") if self.current_user else 0,
+                "body": text,
+                "created_at": now_str,
+            }
+            self.append_message_html(msg_dict)
+            self.chat_input.clear()
         except Exception as e:
-            QMessageBox.warning(self, "Ошибка чата", f"Не удалось отправить сообщение: {e}")
+            QMessageBox.warning(self, "Ошибка чата", f"Не удалось отправить сообщение:\n{e}")
 
     def attach_and_send_file(self):
+        if not self.client.token:
+            QMessageBox.warning(self, "Авторизация", "Вы не авторизованы. Сначала подключитесь к серверу и выполните вход.")
+            self.open_login_dialog()
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Прикрепить медиа или документ",
@@ -818,7 +865,7 @@ class MainWindow(QMainWindow):
                 media_name=media_name,
             )
             now_str = QDateTime.currentDateTime().toString("hh:mm:ss")
-            my_name = self.current_user.get("name", "Диспетчер") if self.current_user else "Диспетчер"
+            my_name = self.current_user.get("name", "Пользователь") if self.current_user else "Пользователь"
             self.append_message_html({
                 "sender_name": my_name,
                 "sender_id": self.current_user.get("id") if self.current_user else 0,
@@ -833,6 +880,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка загрузки", f"Не удалось отправить файл: {e}")
 
     def toggle_record_voice_note(self):
+        if not self.client.token:
+            QMessageBox.warning(self, "Авторизация", "Вы не авторизованы. Сначала подключитесь к серверу и выполните вход.")
+            self.open_login_dialog()
+            return
         if not self.is_recording_voice_note:
             # Старт записи ГС
             self.is_recording_voice_note = True
@@ -968,38 +1019,91 @@ class MainWindow(QMainWindow):
             self.voice.end_call()
             self.on_voice_call_ended()
 
-    # ---------- ДИАЛОГ НАСТРОЙКИ СЕРВЕРА ----------
-    def open_settings_dialog(self):
+    # ---------- ДИАЛОГ АВТОРИЗАЦИИ И НАСТРОЕК ----------
+    def open_login_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Подключение к VPS серверу RampPulse")
-        dialog.setFixedWidth(440)
-        d_layout = QFormLayout(dialog)
+        dialog.setWindowTitle("Авторизация · RampPulse Operations")
+        dialog.setFixedWidth(460)
+        dialog.setStyleSheet("background-color: #0F172A; color: #F8FAFC;")
+        d_layout = QVBoxLayout(dialog)
+        d_layout.setContentsMargins(20, 20, 20, 20)
+        d_layout.setSpacing(14)
 
-        server_input = QLineEdit(self.client.base_url, dialog)
-        email_input = QLineEdit("dispatcher@oto.ru", dialog)
-        pass_input = QLineEdit("Dispatcher2026!", dialog)
+        title = QLabel("Вход в систему управления аэропортом", dialog)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #38BDF8;")
+        d_layout.addWidget(title)
+
+        sub = QLabel("Выберите демо-профиль в 1 клик или введите свои данные:", dialog)
+        sub.setStyleSheet("font-size: 11px; color: #94A3B8;")
+        d_layout.addWidget(sub)
+
+        demo_box = QHBoxLayout()
+        btn_disp = QPushButton("👮 Войти как Диспетчер", dialog)
+        btn_disp.setStyleSheet("background-color: #1E293B; border: 1px solid #38BDF8; color: #38BDF8; font-weight: bold; padding: 8px;")
+        btn_eng = QPushButton("🔧 Войти как Инженер (ТО)", dialog)
+        btn_eng.setStyleSheet("background-color: #1E293B; border: 1px solid #10B981; color: #10B981; font-weight: bold; padding: 8px;")
+        demo_box.addWidget(btn_disp)
+        demo_box.addWidget(btn_eng)
+        d_layout.addLayout(demo_box)
+
+        form = QFormLayout()
+        server_input = QLineEdit(self.settings.value("server_url", self.client.base_url), dialog)
+        email_input = QLineEdit(self.settings.value("email", "dispatcher@oto.ru"), dialog)
+        pass_input = QLineEdit(self.settings.value("password", "Dispatcher2026!"), dialog)
         pass_input.setEchoMode(QLineEdit.EchoMode.Password)
 
-        d_layout.addRow("Адрес VPS (URL):", server_input)
-        d_layout.addRow("Email диспетчера:", email_input)
-        d_layout.addRow("Пароль:", pass_input)
+        def pick_disp():
+            email_input.setText("dispatcher@oto.ru")
+            pass_input.setText("Dispatcher2026!")
 
-        hint = QLabel("Укажите http://31.56.179.117 или локальный http://127.0.0.1:8000", dialog)
-        hint.setStyleSheet("color: #64748B; font-size: 11px;")
-        d_layout.addRow(hint)
+        def pick_eng():
+            email_input.setText("tech1@oto.ru")
+            pass_input.setText("Engineer2026!")
 
-        btn_box = QHBoxLayout()
-        btn_connect = QPushButton("Войти и подключиться", dialog)
-        btn_connect.setProperty("class", "primary-btn")
-        btn_connect.clicked.connect(dialog.accept)
-        btn_box.addWidget(btn_connect)
-        d_layout.addRow(btn_box)
+        btn_disp.clicked.connect(pick_disp)
+        btn_eng.clicked.connect(pick_eng)
 
-        if dialog.exec():
-            vps_url = server_input.text().strip()
-            email = email_input.text().strip()
-            password = pass_input.text().strip()
-            self.connect_to_server(vps_url, email, password)
+        form.addRow("Сервер VPS:", server_input)
+        form.addRow("Email:", email_input)
+        form.addRow("Пароль:", pass_input)
+        d_layout.addLayout(form)
+
+        err_label = QLabel("", dialog)
+        err_label.setStyleSheet("color: #EF4444; font-size: 11px;")
+        d_layout.addWidget(err_label)
+
+        btn_login = QPushButton("Войти в систему", dialog)
+        btn_login.setProperty("class", "primary-btn")
+        btn_login.setStyleSheet("background-color: #2563EB; color: white; font-size: 14px; font-weight: bold; padding: 10px; border-radius: 6px;")
+
+        def do_login():
+            srv = server_input.text().strip()
+            em = email_input.text().strip()
+            pw = pass_input.text().strip()
+            if not srv or not em or not pw:
+                err_label.setText("Заполните все поля.")
+                return
+            err_label.setText("Подключение к серверу...")
+            QApplication.processEvents()
+            try:
+                self.connect_to_server(srv, em, pw)
+                self.settings.setValue("server_url", srv)
+                self.settings.setValue("email", em)
+                self.settings.setValue("password", pw)
+                self.settings.setValue("auto_login", True)
+                dialog.accept()
+            except Exception as e:
+                err_label.setText(f"Ошибка входа: {e}")
+
+        btn_login.clicked.connect(do_login)
+        d_layout.addWidget(btn_login)
+
+        btn_reg = QPushButton("Подать заявку на регистрацию нового инженера", dialog)
+        btn_reg.setStyleSheet("color: #94A3B8; text-decoration: underline; background: none; border: none; padding: 4px;")
+        btn_reg.clicked.connect(lambda: (dialog.reject(), self.open_register_engineer_dialog()))
+        d_layout.addWidget(btn_reg)
+
+        dialog.exec()
 
     def connect_to_server(self, url: str, email: str, password: str):
         self.client.set_base_url(url)
@@ -1008,7 +1112,12 @@ class MainWindow(QMainWindow):
             login_data = self.client.login(email, password)
             self.current_user = login_data.get("user")
             role_ru = "Диспетчер" if self.current_user.get("role") == "dispatcher" else f"Инженер ({self.current_user.get('qual', 'ТО')})"
-            self.user_label.setText(f"👤 {self.current_user.get('name', 'Сотрудник')} · {role_ru}")
+            user_name = self.current_user.get("name", "Пользователь")
+            self.user_label.setText(f"👤 {user_name} · {role_ru} (🟢 Онлайн)")
+            self.user_label.setStyleSheet("color: #10B981; font-weight: bold; font-size: 12px;")
+
+            if hasattr(self, "chat_current_user_label"):
+                self.chat_current_user_label.setText(f"Вы: {user_name} ({role_ru})")
 
             airport_data = self.client.get_airport()
             self.airport_data = airport_data
@@ -1017,7 +1126,113 @@ class MainWindow(QMainWindow):
             self.client.start_websocket()
             self.refresh_contacts()
             self.load_chat_history()
+            self.update_profile_tab_ui()
 
-            self.statusBar().showMessage(f"Успешное подключение к {url}")
+            self.statusBar().showMessage(f"Успешное подключение к {url} под именем {user_name}")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка подключения", f"Не удалось подключиться к серверу:\n{e}")
+            self.user_label.setText("Ошибка авторизации")
+            self.user_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
+            raise e
+
+    # ---------- ВКЛАДКА: ПРОФИЛЬ И НАСТРОЙКИ ----------
+    def init_settings_tab(self):
+        layout = QVBoxLayout(self.tab_settings)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        # 1. Профиль
+        profile_group = QGroupBox("Учётная запись и Профиль", self.tab_settings)
+        p_layout = QFormLayout(profile_group)
+        p_layout.setContentsMargins(16, 16, 16, 16)
+        p_layout.setSpacing(10)
+
+        self.prof_name_label = QLabel("—", profile_group)
+        self.prof_email_label = QLabel("—", profile_group)
+        self.prof_role_label = QLabel("—", profile_group)
+        self.prof_qual_label = QLabel("—", profile_group)
+        self.prof_tech_id_label = QLabel("—", profile_group)
+        self.prof_shift_status_label = QLabel("—", profile_group)
+
+        for lbl in (self.prof_name_label, self.prof_email_label, self.prof_role_label,
+                    self.prof_qual_label, self.prof_tech_id_label, self.prof_shift_status_label):
+            lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #F8FAFC;")
+
+        p_layout.addRow("ФИО / Юзернейм:", self.prof_name_label)
+        p_layout.addRow("Email:", self.prof_email_label)
+        p_layout.addRow("Роль в системе:", self.prof_role_label)
+        p_layout.addRow("Квалификация:", self.prof_qual_label)
+        p_layout.addRow("Табельный номер (Tech ID):", self.prof_tech_id_label)
+        p_layout.addRow("Статус смены:", self.prof_shift_status_label)
+
+        self.btn_toggle_my_shift = QPushButton("Выйти на смену / Завершить смену", profile_group)
+        self.btn_toggle_my_shift.setStyleSheet("background-color: #1E293B; border: 1px solid #10B981; color: #10B981; font-weight: bold; padding: 6px 12px;")
+        self.btn_toggle_my_shift.clicked.connect(self.toggle_my_shift_action)
+        p_layout.addRow("Управление сменой:", self.btn_toggle_my_shift)
+
+        layout.addWidget(profile_group)
+
+        # 2. Сеть
+        net_group = QGroupBox("Параметры сервера RampPulse", self.tab_settings)
+        n_layout = QFormLayout(net_group)
+        n_layout.setContentsMargins(16, 16, 16, 16)
+        n_layout.setSpacing(10)
+
+        self.net_url_label = QLabel("—", net_group)
+        self.net_url_label.setStyleSheet("font-family: monospace; font-size: 13px; color: #38BDF8;")
+        self.net_status_label = QLabel("● Не подключен", net_group)
+        self.net_status_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 13px;")
+
+        n_layout.addRow("Адрес сервера VPS:", self.net_url_label)
+        n_layout.addRow("Связь в реальном времени:", self.net_status_label)
+
+        btn_reconnect = QPushButton("Сменить сервер / Авторизоваться", net_group)
+        btn_reconnect.clicked.connect(self.open_login_dialog)
+        n_layout.addRow("Действие:", btn_reconnect)
+
+        layout.addWidget(net_group)
+
+        # 3. Выход
+        btn_logout = QPushButton("🚪 Выйти из учётной записи (Сменить пользователя)", self.tab_settings)
+        btn_logout.setStyleSheet("background-color: #DC2626; color: white; font-weight: bold; padding: 10px; border-radius: 6px;")
+        btn_logout.clicked.connect(self.logout_action)
+        layout.addWidget(btn_logout)
+
+        layout.addStretch()
+
+    def update_profile_tab_ui(self):
+        u = self.current_user or {}
+        self.prof_name_label.setText(u.get("name", "—"))
+        self.prof_email_label.setText(u.get("email", "—"))
+        role_ru = "Диспетчер смены" if u.get("role") == "dispatcher" else "Инженер ТО"
+        self.prof_role_label.setText(role_ru)
+        self.prof_qual_label.setText(u.get("qual") or "Все допуски (Диспетчер)")
+        self.prof_tech_id_label.setText(str(u.get("tech_id") or "DISP-01"))
+        on_shift = u.get("on_shift", True)
+        self.prof_shift_status_label.setText("🟢 На смене (Активен)" if on_shift else "⚪ Смена завершена")
+        self.net_url_label.setText(self.client.base_url)
+        self.net_status_label.setText("● Подключен к VPS" if self.client.is_connected else "● Офлайн")
+        self.net_status_label.setStyleSheet("color: #10B981; font-weight: bold;" if self.client.is_connected else "color: #EF4444; font-weight: bold;")
+
+    def toggle_my_shift_action(self):
+        if not self.current_user:
+            return
+        current = self.current_user.get("on_shift", True)
+        target = not current
+        try:
+            self.client.set_shift(target)
+            self.current_user["on_shift"] = target
+            self.update_profile_tab_ui()
+            status_txt = "вышли на смену" if target else "завершили смену"
+            QMessageBox.information(self, "Смена", f"Вы успешно {status_txt}.")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка смены", f"Не удалось изменить статус смены:\n{e}")
+
+    def logout_action(self):
+        self.client.token = None
+        self.client.user = None
+        self.current_user = None
+        self.settings.setValue("auto_login", False)
+        self.user_label.setText("Не авторизован")
+        self.user_label.setStyleSheet("color: #EF4444; font-weight: bold; font-size: 12px;")
+        self.update_profile_tab_ui()
+        self.open_login_dialog()
