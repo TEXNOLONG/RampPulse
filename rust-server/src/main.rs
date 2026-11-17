@@ -57,7 +57,19 @@ struct AppState {
     stun_urls: Vec<String>,
     turn_urls: Vec<String>,
     turn_shared_secret: Option<String>,
+    login_guard: Arc<std::sync::Mutex<std::collections::HashMap<String, LoginAttempts>>>,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct LoginAttempts {
+    failures: u32,
+    window_start: std::time::Instant,
+    locked_until: Option<std::time::Instant>,
+}
+
+const LOGIN_MAX_FAILURES: u32 = 5;
+const LOGIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+const LOGIN_LOCK: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Serialize)]
 struct ApiError {
@@ -227,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turn_shared_secret: env::var("TURN_SHARED_SECRET")
             .ok()
             .filter(|value| !value.is_empty()),
+        login_guard: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let tick_engine = state.engine.clone();
@@ -239,6 +252,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/me", get(me))
         .route("/api/auth/register", post(register))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/logout-others", post(logout_others))
+        .route("/api/profile", get(profile).post(update_profile))
+        .route("/api/profile/password", post(change_password))
+        .route("/api/presence", get(presence))
+        .route("/api/chat/rooms/{id}/typing", post(chat_typing))
         .route("/api/airport", get(airport))
         .route("/api/state", get(state_snapshot))
         .route("/api/routes/preview", post(route_preview))
@@ -1225,6 +1243,7 @@ async fn chat_contacts(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     let store = state.store.clone();
+    let online: HashSet<i64> = state.realtime.online_users().into_iter().collect();
     let contacts = task::spawn_blocking(move || store.chat_contacts(&user))
         .await
         .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
@@ -1234,6 +1253,13 @@ async fn chat_contacts(
                 "Не удалось загрузить сотрудников",
             )
         })?;
+    let contacts: Vec<_> = contacts
+        .into_iter()
+        .map(|mut contact| {
+            contact.online = online.contains(&contact.id);
+            contact
+        })
+        .collect();
     Ok(Json(serde_json::json!({"contacts":contacts})))
 }
 
@@ -1851,13 +1877,50 @@ async fn login(
     let store = state.store.clone();
     let email = body.email.trim().to_lowercase();
     let password = body.password;
-    let (user, token) =
+    let guard_key = email.clone();
+    {
+        let guard = state.login_guard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(locked) = guard.get(&guard_key).and_then(|a| a.locked_until) {
+            if locked > std::time::Instant::now() {
+                return Err(HttpError(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Слишком много неудачных попыток. Повторите через минуту",
+                ));
+            }
+        }
+    }
+    let result =
         task::spawn_blocking(move || store.authenticate_and_create_session(&email, &password))
             .await
-            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-            .map_err(|error| match error {
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
+    {
+        let mut guard = state.login_guard.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if matches!(result, Err(store::AuthFailure::InvalidCredentials)) {
+            let entry = guard.entry(guard_key.clone()).or_insert(LoginAttempts {
+                failures: 0,
+                window_start: now,
+                locked_until: None,
+            });
+            if now.duration_since(entry.window_start) > LOGIN_WINDOW {
+                *entry = LoginAttempts { failures: 0, window_start: now, locked_until: None };
+            }
+            entry.failures += 1;
+            if entry.failures >= LOGIN_MAX_FAILURES {
+                entry.locked_until = Some(now + LOGIN_LOCK);
+                entry.failures = 0;
+                entry.window_start = now;
+            }
+        } else if result.is_ok() {
+            guard.remove(&guard_key);
+        }
+        if guard.len() > 10_000 {
+            guard.retain(|_, a| now.duration_since(a.window_start) < LOGIN_WINDOW);
+        }
+    }
+    let (user, token) = result.map_err(|error| match error {
                 store::AuthFailure::InvalidCredentials => {
-                    HttpError(StatusCode::UNAUTHORIZED, "Неверный email или пароль")
+                    HttpError(StatusCode::UNAUTHORIZED, "Неверный логин или пароль")
                 }
                 store::AuthFailure::Pending => HttpError(
                     StatusCode::FORBIDDEN,
@@ -2167,7 +2230,29 @@ fn origin_is_same_site(headers: &HeaderMap) -> bool {
     matches!(origin_uri.scheme_str(), Some("http" | "https"))
 }
 
-async fn websocket_session(mut socket: WebSocket, user: store::PublicUser, hub: RealtimeHub) {
+async fn websocket_session(socket: WebSocket, user: store::PublicUser, hub: RealtimeHub) {
+    let user_id = user.id;
+    let role = user.role.clone();
+    if hub.connect(user_id) {
+        publish_presence(&hub, user_id, &role, true);
+    }
+    websocket_loop(socket, user, hub.clone()).await;
+    if hub.disconnect(user_id) {
+        publish_presence(&hub, user_id, &role, false);
+    }
+}
+
+fn publish_presence(hub: &RealtimeHub, user_id: i64, role: &str, online: bool) {
+    hub.publish(
+        EventKind::PresenceChanged,
+        Audience::All,
+        Some(ActorRef { user_id, role: role.into() }),
+        Some(EntityRef { kind: "user".into(), id: user_id.to_string(), version: 1 }),
+        serde_json::json!({ "user_id": user_id, "online": online }),
+    );
+}
+
+async fn websocket_loop(mut socket: WebSocket, user: store::PublicUser, hub: RealtimeHub) {
     let mut events = hub.subscribe();
     let mut last_seen = 0_u64;
     let ready = RealtimeEvent {
@@ -2323,4 +2408,168 @@ pub(crate) fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default()
+}
+
+
+#[derive(Deserialize)]
+struct ProfileBody {
+    name: String,
+    username: String,
+    #[serde(default)]
+    bio: String,
+    #[serde(default)]
+    avatar_color: String,
+}
+
+#[derive(Deserialize)]
+struct PasswordBody {
+    current_password: String,
+    new_password: String,
+}
+
+async fn profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let store = state.store.clone();
+    let user_id = user.id;
+    let sessions = task::spawn_blocking(move || store.session_count(user_id))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .unwrap_or(1);
+    Ok(Json(serde_json::json!({ "user": user, "sessions": sessions })))
+}
+
+fn valid_username(value: &str) -> bool {
+    (3..=32).contains(&value.len())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+fn valid_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn update_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let name = body.name.trim().to_owned();
+    let username = body.username.trim().trim_start_matches('@').to_lowercase();
+    let bio = body.bio.trim().to_owned();
+    let color = if body.avatar_color.is_empty() { user.avatar_color.clone() } else { body.avatar_color.clone() };
+    if name.chars().count() < 2 || name.chars().count() > 64 {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Имя должно содержать от 2 до 64 символов"));
+    }
+    if !valid_username(&username) {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Логин: 3–32 символа, латиница, цифры, точка, дефис или подчёркивание"));
+    }
+    if bio.chars().count() > 160 {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Описание не длиннее 160 символов"));
+    }
+    if !valid_color(&color) {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Некорректный цвет аватара"));
+    }
+    let store = state.store.clone();
+    let user_id = user.id;
+    let updated = task::spawn_blocking(move || store.update_profile(user_id, &name, &username, &bio, &color))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить профиль"))?
+        .ok_or(HttpError(StatusCode::CONFLICT, "Этот логин уже занят"))?;
+    state.realtime.publish(
+        EventKind::PresenceChanged,
+        Audience::All,
+        Some(ActorRef { user_id, role: updated.role.clone() }),
+        Some(EntityRef { kind: "user".into(), id: user_id.to_string(), version: 2 }),
+        serde_json::json!({
+            "user_id": user_id,
+            "online": true,
+            "profile": { "name": updated.name, "username": updated.username, "bio": updated.bio, "avatar_color": updated.avatar_color },
+        }),
+    );
+    Ok(Json(serde_json::json!({ "user": updated })))
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    if body.new_password.chars().count() < 8 {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Новый пароль — минимум 8 символов"));
+    }
+    if body.new_password == body.current_password {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Новый пароль совпадает с текущим"));
+    }
+    let store = state.store.clone();
+    let token = session_from_headers(&headers).unwrap_or_default();
+    let user_id = user.id;
+    let changed = task::spawn_blocking(move || {
+        let changed = store.change_password(user_id, &body.current_password, &body.new_password)?;
+        if changed {
+            store.delete_other_sessions(user_id, &token)?;
+        }
+        Ok::<bool, rusqlite::Error>(changed)
+    })
+    .await
+    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сменить пароль"))?;
+    if !changed {
+        return Err(HttpError(StatusCode::FORBIDDEN, "Текущий пароль указан неверно"));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn logout_others(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let token = session_from_headers(&headers).unwrap_or_default();
+    let store = state.store.clone();
+    let removed = task::spawn_blocking(move || store.delete_other_sessions(user.id, &token))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
+    Ok(Json(serde_json::json!({ "ok": true, "removed": removed })))
+}
+
+async fn presence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    authenticated_user(&state, &headers).await?;
+    Ok(Json(serde_json::json!({ "online": state.realtime.online_users() })))
+}
+
+async fn chat_typing(
+    State(state): State<AppState>,
+    Path(room_id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let store = state.store.clone();
+    let user_id = user.id;
+    let recipients = task::spawn_blocking(move || store.chat_recipients(room_id, user_id))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::FORBIDDEN, "Нет доступа к этому чату"))?;
+    for recipient in recipients {
+        state.realtime.publish(
+            EventKind::ChatTyping,
+            Audience::User(recipient),
+            Some(ActorRef { user_id, role: user.role.clone() }),
+            Some(EntityRef { kind: "chat_room".into(), id: room_id.to_string(), version: 1 }),
+            serde_json::json!({ "room_id": room_id, "user_id": user_id, "name": user.name }),
+        );
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

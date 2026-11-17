@@ -478,7 +478,7 @@ impl AccountStore {
     ) -> Result<(PublicUser, String), AuthFailure> {
         let (user, encoded): (PublicUser, String) = {
             let connection = self.connection().map_err(|_| AuthFailure::Storage)?;
-            let mut statement = connection.prepare("SELECT id,email,username,bio,avatar_color,name,role,status,qual,types,base,tech_id,on_shift,created_at,approved_at,password_hash FROM users WHERE email=?1 COLLATE NOCASE")
+            let mut statement = connection.prepare("SELECT id,email,username,bio,avatar_color,name,role,status,qual,types,base,tech_id,on_shift,created_at,approved_at,password_hash FROM users WHERE email=?1 COLLATE NOCASE OR (username<>'' AND username=?1 COLLATE NOCASE) LIMIT 1")
                 .map_err(|_| AuthFailure::Storage)?;
             statement
                 .query_row([email], |row| {
@@ -577,6 +577,78 @@ impl AccountStore {
         )?;
         connection.execute("DELETE FROM sessions WHERE token=?1", [token])?;
         Ok(())
+    }
+
+    /// Updates the editable profile fields. Returns `Ok(None)` when the username is taken.
+    pub fn update_profile(
+        &self,
+        user_id: i64,
+        name: &str,
+        username: &str,
+        bio: &str,
+        avatar_color: &str,
+    ) -> rusqlite::Result<Option<PublicUser>> {
+        let connection = self.connection()?;
+        let taken: Option<i64> = connection
+            .query_row(
+                "SELECT id FROM users WHERE username=?1 COLLATE NOCASE AND id<>?2 AND username<>''",
+                params![username, user_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if taken.is_some() {
+            return Ok(None);
+        }
+        connection.execute(
+            "UPDATE users SET name=?1,username=?2,bio=?3,avatar_color=?4 WHERE id=?5",
+            params![name, username, bio, avatar_color, user_id],
+        )?;
+        drop(connection);
+        self.user_by_id(user_id).map(Some)
+    }
+
+    /// Verifies the current password and stores a new one. `Ok(false)` = wrong password.
+    pub fn change_password(&self, user_id: i64, current: &str, new: &str) -> rusqlite::Result<bool> {
+        let connection = self.connection()?;
+        let encoded: String = connection.query_row(
+            "SELECT password_hash FROM users WHERE id=?1",
+            [user_id],
+            |row| row.get(0),
+        )?;
+        if !verify_password(current, &encoded) {
+            return Ok(false);
+        }
+        let mut salt = [0_u8; 16];
+        rand::fill(&mut salt);
+        let hash = hash_password(new, &salt, PBKDF2_ITERATIONS);
+        connection.execute(
+            "UPDATE users SET password_hash=?1 WHERE id=?2",
+            params![hash, user_id],
+        )?;
+        Ok(true)
+    }
+
+    /// Ends every session of the user except the one identified by `keep_token`.
+    pub fn delete_other_sessions(&self, user_id: i64, keep_token: &str) -> rusqlite::Result<usize> {
+        let connection = self.connection()?;
+        let removed = connection.execute(
+            "DELETE FROM rust_sessions WHERE user_id=?1 AND token_hash<>?2",
+            params![user_id, hash_session_token(keep_token)],
+        )?;
+        connection.execute(
+            "DELETE FROM sessions WHERE user_id=?1 AND token<>?2",
+            params![user_id, keep_token],
+        )?;
+        Ok(removed)
+    }
+
+    pub fn session_count(&self, user_id: i64) -> rusqlite::Result<i64> {
+        let connection = self.connection()?;
+        connection.query_row(
+            "SELECT COUNT(*) FROM rust_sessions WHERE user_id=?1 AND expires_at > strftime('%s','now')",
+            [user_id],
+            |row| row.get(0),
+        )
     }
 
     pub fn register_engineer(&self, new: NewEngineer) -> rusqlite::Result<PublicUser> {
@@ -941,7 +1013,7 @@ impl AccountStore {
         } else {
             "dispatcher"
         };
-        let mut statement=connection.prepare("SELECT id,name,username,qual,on_shift FROM users WHERE role=?1 AND status='active' ORDER BY on_shift DESC,name COLLATE NOCASE")?;
+        let mut statement=connection.prepare("SELECT id,name,username,qual,on_shift,avatar_color,bio FROM users WHERE role=?1 AND status='active' ORDER BY on_shift DESC,name COLLATE NOCASE")?;
         let rows = statement.query_map([opposite], |row| {
             Ok(ChatContact {
                 id: row.get(0)?,
@@ -949,6 +1021,9 @@ impl AccountStore {
                 username: row.get(2)?,
                 qual: row.get(3)?,
                 on_shift: row.get::<_, i64>(4)? != 0,
+                avatar_color: row.get(5)?,
+                bio: row.get(6)?,
+                online: false,
             })
         })?;
         rows.collect()
@@ -1306,6 +1381,9 @@ pub struct ChatContact {
     pub username: String,
     pub qual: Option<String>,
     pub on_shift: bool,
+    pub avatar_color: String,
+    pub bio: String,
+    pub online: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
