@@ -1013,7 +1013,7 @@ impl AccountStore {
         } else {
             "dispatcher"
         };
-        let mut statement=connection.prepare("SELECT id,name,username,qual,on_shift,avatar_color,bio FROM users WHERE role=?1 AND status='active' ORDER BY on_shift DESC,name COLLATE NOCASE")?;
+        let mut statement=connection.prepare("SELECT id,name,username,qual,on_shift,avatar_color,bio,tech_id FROM users WHERE role=?1 AND status='active' ORDER BY on_shift DESC,name COLLATE NOCASE")?;
         let rows = statement.query_map([opposite], |row| {
             Ok(ChatContact {
                 id: row.get(0)?,
@@ -1023,6 +1023,7 @@ impl AccountStore {
                 on_shift: row.get::<_, i64>(4)? != 0,
                 avatar_color: row.get(5)?,
                 bio: row.get(6)?,
+                tech_id: row.get(7)?,
                 online: false,
             })
         })?;
@@ -1383,6 +1384,7 @@ pub struct ChatContact {
     pub on_shift: bool,
     pub avatar_color: String,
     pub bio: String,
+    pub tech_id: Option<i64>,
     pub online: bool,
 }
 

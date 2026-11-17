@@ -1,6 +1,6 @@
 [package]
 name = "ramppulse"
-version = "0.4.0"
+version = "0.5.0"
 description = "Airport operations desktop application"
 authors = ["RampPulse"]
 edition = "2021"

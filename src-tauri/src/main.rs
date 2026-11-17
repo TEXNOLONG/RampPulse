@@ -514,7 +514,12 @@ fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String
     .find(|path| path.is_file())
     .ok_or_else(|| format!("В сборку RampPulse не вложен Rust-сервис ({binary_name})"))?;
     let airport_file = root.join("data").join("airport_sheremetyevo.json");
-    let frontend_dir = root.join("frontend");
+    // Dev checkout serves the React build from web/dist; installed bundles ship it as `frontend/`.
+    let frontend_dir = if root.join("web/dist/index.html").is_file() {
+        root.join("web/dist")
+    } else {
+        root.join("frontend")
+    };
     let attachments_dir = db_path
         .parent()
         .unwrap_or_else(|| Path::new("."))

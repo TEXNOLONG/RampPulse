@@ -440,8 +440,9 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
 
     let route = match uri.path() {
         "/" => "index.html",
-        "/login" => "auth.html",
-        "/engineer" => "engineer.html",
+        "/login" | "/engineer" if !state.frontend_dir.join("assets").is_dir() => {
+            if uri.path() == "/login" { "auth.html" } else { "engineer.html" }
+        }
         path if path.starts_with("/static/") => path.trim_start_matches("/static/"),
         path => path.trim_start_matches('/'),
     };
@@ -457,8 +458,17 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
     let candidate = root.join(&relative);
+    let mut relative = relative;
     let path = match tokio::fs::canonicalize(&candidate).await {
         Ok(path) if path.starts_with(&root) && path.is_file() => path,
+        // SPA fallback: unknown extension-less routes (e.g. /engineer/chat) render the app shell.
+        _ if relative.extension().is_none() && !uri.path().starts_with("/api/") => {
+            relative = PathBuf::from("index.html");
+            match tokio::fs::canonicalize(root.join("index.html")).await {
+                Ok(path) => path,
+                Err(_) => return StatusCode::NOT_FOUND.into_response(),
+            }
+        }
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let contents = match tokio::fs::read(path).await {
@@ -478,6 +488,10 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "webmanifest" => "application/manifest+json",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ico" => "image/x-icon",
@@ -489,7 +503,15 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
         .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        .insert(
+            header::CACHE_CONTROL,
+            // Vite emits content-hashed files under /assets: safe to cache forever.
+            HeaderValue::from_static(if relative.starts_with("assets") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            }),
+        );
     response
 }
 
@@ -926,6 +948,11 @@ async fn create_request(
             StatusCode::BAD_REQUEST,
             "Некорректный приоритет заявки",
         ));
+    }
+    // ТЗ: квалификация определяется по описанию неисправности, если диспетчер её не задал.
+    let mut body = body;
+    if body.qual.trim().is_empty() || body.qual.trim().eq_ignore_ascii_case("auto") {
+        body.qual = classify_qualification(&format!("{} {}", body.description, body.extra)).to_owned();
     }
     let read_store = state.store.clone();
     let engineers = task::spawn_blocking(move || read_store.active_engineers())
@@ -2572,4 +2599,21 @@ async fn chat_typing(
         );
     }
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+
+/// Keyword classifier for the required engineer qualification (Планер / Двигатель / Авионика).
+fn classify_qualification(text: &str) -> &'static str {
+    let t = text.to_lowercase();
+    let score = |words: &[&str]| words.iter().filter(|w| t.contains(*w)).count();
+    let engine = score(&["двигател", "всу", "apu", "запуск", "масл", "турбин", "лопат", "тяг", "реверс", "топлив", "компрессор", "форсаж", "помпаж", "обороты"]);
+    let avionics = score(&["авионик", "радио", "vhf", "навиг", "связ", "датчик", "индикац", "экран", "дисплей", "автопилот", "транспондер", "fms", "ошибк", "блок", "проводк", "электр", "компьютер", "пилотаж"]);
+    let airframe = score(&["планер", "обшивк", "шасси", "гидравл", "стойк", "тормоз", "колес", "колёс", "дверь", "люк", "крыл", "закрылк", "фюзеляж", "трещин", "вмятин", "течь", "утечк"]);
+    if engine > avionics && engine >= airframe && engine > 0 {
+        "Двигатель"
+    } else if avionics > engine && avionics >= airframe && avionics > 0 {
+        "Авионика"
+    } else {
+        "Планер"
+    }
 }

@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RampPulse",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "identifier": "ru.oto.airport-crm",
   "build": {
     "beforeDevCommand": "npm run ui:build",
     "beforeBuildCommand": "npm run ui:build",
-    "frontendDist": "../frontend"
+    "frontendDist": "../web/dist"
   },
   "app": {
     "withGlobalTauri": true,
@@ -38,7 +38,7 @@
     "shortDescription": "RampPulse · Airport operations desktop application",
     "resources": {
       "../data/": "data/",
-      "../frontend/": "frontend/",
+      "../web/dist/": "frontend/",
       "resources/server/": "server/"
     },
     "icon": [
@@ -48,6 +48,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "targets": ["deb", "rpm"]
+    "targets": [
+      "deb",
+      "rpm"
+    ]
   }
 }
