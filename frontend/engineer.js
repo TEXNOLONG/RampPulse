@@ -246,7 +246,7 @@ function taskCard(r) {
         ${busy.has(`${r.id}:${action[0]}`) ? 'disabled' : ''}>
         ${busy.has(`${r.id}:${action[0]}`) ? 'Сохраняем…' : (action[0] === 'arrive' ? 'На месте' : action[0] === 'resolve' ? 'Завершено' : action[1])}</button>` : ''}
     </div>
-    <div class="eng-steps" aria-label="Этапы выполнения">${['Принял','В пути','На месте','Завершено'].map((label, i) => `<div class="eng-step ${i + 1 < activeStep ? 'done' : ''} ${i + 1 === activeStep ? 'current' : ''}"><i>${i + 1 < activeStep ? '✓' : i + 1}</i><span>${label}</span></div>`).join('')}</div>
+    <div class="eng-steps" aria-label="Этапы выполнения">${['Принял','В пути','На месте','Завершено'].map((label, i) => `<div class="eng-step ${i + 1 < activeStep ? 'done' : ''} ${i + 1 === activeStep ? 'current' : ''}"><i>${i + 1 < activeStep ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.2 4.2L19 6.5"/></svg>' : i + 1}</i><span>${label}</span></div>`).join('')}</div>
   </article>`;
 }
 

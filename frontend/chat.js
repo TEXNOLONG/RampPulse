@@ -588,6 +588,7 @@
     $('#chatToggle').addEventListener('click', async () => {
       ensureAudioContext();
       const panel = $('#chatPanel');
+      if (panel.classList.contains('open')) { $('#chatClose').click(); return; }
       panel.hidden = false;
       requestAnimationFrame(() => panel.classList.add('open'));
       $('#chatToggle').setAttribute('aria-expanded','true');
@@ -733,7 +734,7 @@
     $('#chatCall').addEventListener('click', () => startCall().catch(error => toastIncoming('Не удалось позвонить', window.otoBridge.errorMessage(error))));
     $('#callAnswer').addEventListener('click', () => acceptCall());
     $('#callDecline').addEventListener('click', () => endCall(call?.incoming ? 'decline' : 'hangup'));
-    $('#callMute').addEventListener('click', event => { if (!call?.stream) return; const enabled = call.stream.getAudioTracks().some(track => track.enabled); call.stream.getAudioTracks().forEach(track => { track.enabled = !enabled; }); event.currentTarget.setAttribute('aria-pressed', String(enabled)); event.currentTarget.textContent = enabled ? 'Включить микрофон' : 'Отключить микрофон'; });
+    $('#callMute').addEventListener('click', event => { if (!call?.stream) return; const enabled = call.stream.getAudioTracks().some(track => track.enabled); call.stream.getAudioTracks().forEach(track => { track.enabled = !enabled; }); event.currentTarget.setAttribute('aria-pressed', String(enabled)); const muteLabel = event.currentTarget.querySelector('span'); if (muteLabel) muteLabel.textContent = enabled ? 'Включить' : 'Микрофон'; });
     $('#callHangup').addEventListener('click', () => endCall());
     $('#callDialog').addEventListener('cancel', event => event.preventDefault());
     document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); $('#chatToggle').click(); } });

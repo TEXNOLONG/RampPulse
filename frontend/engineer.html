@@ -1,30 +1,128 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0A0E17"><title>Смена инженера · RampPulse</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/rampulse-ui.css?v=1"></head>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09090B">
+  <title>Смена инженера · RampPulse</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/rp.css?v=4.0">
+</head>
 <body class="engineer-page">
-<button class="app-window-close" type="button" data-close-app aria-label="Закрыть приложение" title="Закрыть приложение"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
-<section class="boot-screen video-only" id="engStartup" role="status" aria-live="polite" aria-label="Запуск RampPulse">
-  <video class="flight-video" autoplay muted loop playsinline preload="auto" aria-hidden="true"><source src="/static/assets/oto-splash.webm" type="video/webm"></video>
-  <div class="flight-hud" aria-hidden="true"><div class="flight-hud-group"><span>RampPulse / SVO</span><span>55°58′N&nbsp; 037°24′E</span></div><div class="flight-hud-group"><span class="flight-signal">СВЯЗЬ · АКТИВНА</span><span>UTC+03</span></div></div>
-  <div class="flight-frame"><div class="flight-brand"><svg class="flight-brand-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1" opacity=".45"/><circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="1" opacity=".35"/><path d="M16 16 26 8" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="16" cy="16" r="1.5" fill="currentColor"/></svg><div><div class="flight-brand-title">RampPulse · ОПЕРАЦИОННЫЙ ЦЕНТР</div><div class="flight-brand-subtitle">АЭРОПОРТОВЫЕ СЛУЖБЫ · UUEE</div></div></div>
-  <div class="flight-copy"><span class="flight-kicker" id="engBootStatus">PRE-FLIGHT CHECK: Инициализация систем…</span><h1>Смена на перроне</h1><p>Загружаем службы и данные аэропорта</p></div>
-  <div class="boot-progress" role="progressbar" aria-label="Готовность систем" aria-valuemin="0" aria-valuemax="100" aria-valuenow="8"><span id="engBootProgress" style="transform:scaleX(.08)"></span></div>
-  <div class="boot-stages" id="engBootStages" aria-hidden="true"><span  data-eng-stage="0" class="active">PRE-FLIGHT</span><i></i><span  data-eng-stage="1">RADAR</span><i></i><span  data-eng-stage="2">CABIN</span><i></i><span  data-eng-stage="3">TAKEOFF</span></div>
-  <div class="boot-foot"><span>СИСТЕМА <strong>НОРМА</strong></span><span>ДАННЫЕ <strong>ЛОКАЛЬНО</strong></span><span>ЗАГРУЗКА <strong id="engBootProgressPercent">08%</strong></span></div>
-  <button class="boot-retry" id="engBootRetry" type="button" hidden>Повторить запуск</button>
-  </div>
-</section>
-<a class="skip-link" href="#engTasks">Перейти к текущим задачам</a>
-<div class="eng-app">
-  <header class="eng-top"><a class="rail-brand" href="/" aria-label="RampPulse">RP</a><div class="eng-top-context"><span class="workspace-kicker">РАБОЧИЙ ТЕРМИНАЛ</span><b id="engAirport">Аэропорт · загрузка</b></div><div class="eng-top-actions"><span class="eng-conn" id="engConn"><i></i><span>Связь</span></span><button class="eng-icon-btn" id="engRefresh" type="button" title="Обновить смену" aria-label="Обновить смену"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button><button class="session-open" id="newSession" type="button" aria-label="Открыть окно второго аккаунта" title="Откроется отдельное окно входа; чат останется в этом окне"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2"/><path d="M8 20h11a2 2 0 0 0 2-2V9"/></svg><span>Второй аккаунт</span></button><button class="chat-toggle" id="chatToggle" type="button" aria-label="Открыть чат смены" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/><path d="M8 11h8M8 14h5"/></svg><span class="chat-unread" id="chatUnread" hidden>0</span></button><button class="eng-logout" id="engLogout" type="button">Выйти из аккаунта</button></div></header>
-  <main class="eng-main"><section class="eng-hero"><div><div class="eng-eyebrow"><span class="status-led"></span>Смена на перроне</div><h1 id="engName">Загрузка…</h1><p class="eng-sub" id="engSub">Подготавливаем рабочее место</p></div><div class="eng-hero-side"><div class="eng-avatar" id="engAvatar">И</div><button id="engShiftToggle" class="shift-toggle" type="button" aria-pressed="false">Выйти на смену</button></div></section>
-  <section class="eng-stats" id="engStats" aria-label="Показатели смены"></section>
-  <section class="eng-grid"><div class="eng-main-col"><section class="eng-card eng-task-card"><div class="eng-card-head"><div><span class="panel-kicker">НАЗНАЧЕНИЯ</span><h2>Текущая работа</h2><p id="engTaskHint">Активные назначения и этапы работы</p></div><span class="eng-live-dot" title="Синхронизация в реальном времени"></span></div><div id="engTasks"></div></section>
-  <section class="eng-card"><div class="eng-card-head"><div><span class="panel-kicker">НАВИГАЦИЯ</span><h2>Маршрут до борта</h2><p>Положение и путь по рулёжным дорожкам</p></div><button class="route-open" type="button" id="routeOpen" aria-label="Открыть маршрут в диспетчерской">Карта</button></div><div class="eng-map-wrap"><svg id="engMap" viewBox="0 0 600 260" role="img" aria-label="Маршрут инженера"></svg><div class="eng-map-empty" id="engMapEmpty">Нет активного маршрута</div></div></section>
-  <section class="eng-card"><div class="eng-card-head"><div><span class="panel-kicker">ЗАКРЫТЫЕ РАБОТЫ</span><h2>История смены</h2><p>Последние выполненные заявки</p></div></div><div id="engHistory"></div></section></div>
-  <aside class="eng-side"><section class="eng-card"><div class="eng-card-head"><div><span class="panel-kicker">ЛЕНТА СМЕНЫ</span><h2>События</h2><p>Обновления по вашим заявкам</p></div></div><div class="eng-events" id="engEvents"></div></section><section class="eng-note"><div class="note-mark">15</div><div><b>Норматив прибытия</b><span>Время от создания заявки до прибытия инженера на стоянку.</span></div></section><section class="eng-profile"><div class="profile-mark" id="engProfileMark">И</div><div class="profile-copy"><b id="engProfileName">Инженер</b><span>Полевой специалист</span></div><button class="user-logout" type="button" data-logout-trigger>Выйти</button></section></aside></section></main>
-</div>
-<dialog id="shiftDlg" class="shift-dialog" aria-labelledby="shiftTitle"><form method="dialog"><span class="panel-kicker">УПРАВЛЕНИЕ СМЕНОЙ</span><h2 id="shiftTitle">Завершить смену?</h2><p id="shiftConfirmText">Подтвердите завершение работы на перроне.</p><p id="shiftError" class="form-message bad" role="alert" hidden></p><div class="row"><button type="button" id="shiftCancel">Остаться на смене</button><button type="button" class="danger" id="shiftConfirm">Завершить смену</button></div></form></dialog>
-<div id="engToast" class="toast" role="status" aria-live="polite" hidden></div>
-<aside class="chat-panel" id="chatPanel" aria-label="Чат смены" hidden><header class="chat-head"><div><span class="panel-kicker">КОМАНДНЫЙ КАНАЛ</span><h2>Связь смены</h2></div><button id="chatClose" class="chat-close" type="button" aria-label="Закрыть чат">×</button></header><div class="chat-rooms" id="chatRooms" role="tablist" aria-label="Каналы связи"></div><div class="chat-conversation-head"><div><b id="chatRoomName">Общий канал смены</b><span id="chatRoomState">Сообщения команды</span></div><button id="chatCall" type="button" class="chat-call" aria-label="Позвонить собеседнику" title="Голосовой вызов"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></button></div><div class="chat-messages" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div><div class="sticker-picker" id="stickerPicker" hidden></div><form id="chatForm" class="chat-form"><input type="file" id="chatFileInput" style="display:none;" /><button id="chatFileBtn" class="chat-sticker-toggle" type="button" title="Прикрепить файл или фото"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 6.5-6.5a4 4 0 0 1 5.7 5.7L10 21a6 6 0 0 1-8.5-8.5L11 3"/></svg></button><button id="chatVoiceBtn" class="chat-sticker-toggle" type="button" title="Голосовое сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-4 0h8"/></svg></button><button id="chatStickerToggle" class="chat-sticker-toggle" type="button" aria-label="Открыть стикеры">＋</button><label class="sr-only" for="chatInput">Сообщение команде</label><textarea id="chatInput" rows="1" maxlength="2000" placeholder="Сообщение…"></textarea><button class="chat-send" type="submit" aria-label="Отправить сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 16 8-16 8 3-8zM7 12h13"/></svg></button></form><div class="chat-footer-note">Оперативный канал · сообщения сохраняются локально</div></aside><div class="chat-notice" id="chatNotice" role="status" aria-live="polite" hidden></div>
-<dialog id="callDialog" class="call-dialog" aria-labelledby="callTitle"><div class="call-orbit" aria-hidden="true"><span></span><i></i></div><span class="panel-kicker" id="callStatus">ЗАЩИЩЁННЫЙ КАНАЛ</span><h2 id="callTitle">Голосовой вызов</h2><p id="callPeer">Собеседник</p><div id="callTimer" class="call-timer" hidden>00:00</div><div class="call-incoming-actions" id="callIncomingActions"><button type="button" id="callAnswer" class="call-answer">Ответить</button><button type="button" id="callDecline" class="danger">Отклонить</button></div><div class="call-active-actions" id="callActiveActions" hidden><button type="button" id="callMute" class="call-control" aria-pressed="false">Отключить микрофон</button><button type="button" id="callHangup" class="danger">Завершить звонок</button></div><audio id="remoteAudio" autoplay playsinline></audio></dialog>
-<script src="/static/desktop.js?v=2.6"></script><script src="/static/bridge.js?v=2.6"></script><script src="/static/chat.js?v=3.10"></script><script src="/static/engineer.js?v=2.6"></script><script src="/static/window-controls.js?v=2.6"></script>
-</body></html>
+  <button class="app-window-close" type="button" data-close-app aria-label="Закрыть приложение" title="Закрыть приложение"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
+
+  <section class="boot-screen" id="engStartup" role="status" aria-live="polite" aria-label="Запуск RampPulse">
+    <video class="boot-video" autoplay muted loop playsinline preload="auto" aria-hidden="true"><source src="/static/assets/oto-splash.webm" type="video/webm"></video>
+    <div class="boot-card">
+      <div class="boot-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="21"/><circle cx="24" cy="24" r="13"/><path class="boot-sweep" d="M24 24 L24 3"/><circle cx="24" cy="24" r="2.4" class="dot"/></svg></div>
+      <div class="boot-word">RampPulse</div>
+      <span class="boot-status" id="engBootStatus">Инициализация систем…</span>
+      <div class="boot-progress" role="progressbar" aria-label="Готовность систем" aria-valuemin="0" aria-valuemax="100" aria-valuenow="8"><span id="engBootProgress" style="transform:scaleX(.08)"></span></div>
+      <div class="boot-stages" id="engBootStages" aria-hidden="true"><span data-eng-stage="0" class="active">PRE-FLIGHT</span><span data-eng-stage="1">RADAR</span><span data-eng-stage="2">CABIN</span><span data-eng-stage="3">TAKEOFF</span></div>
+      <strong class="boot-percent" id="engBootProgressPercent">08%</strong>
+      <button class="boot-retry" id="engBootRetry" type="button" hidden>Повторить запуск</button>
+    </div>
+  </section>
+
+  <a class="skip-link" href="#engTasks">Перейти к текущим задачам</a>
+
+  <header class="eng-top">
+    <div class="eng-brand">
+      <a class="rail-brand" href="/" aria-label="RampPulse"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 12 18 6"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg></a>
+      <div><b>RampPulse</b><small id="engAirport">Аэропорт · загрузка</small></div>
+    </div>
+    <div class="eng-top-actions">
+      <span class="eng-conn" id="engConn"><i></i><span>Связь</span></span>
+      <button class="icon-btn" id="engRefresh" type="button" title="Обновить смену" aria-label="Обновить смену"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.8-2L20 12M4 12l2.6 5a7 7 0 0 0 11.8-2"/></svg></button>
+      <button class="icon-btn chat-toggle" id="chatToggle" type="button" aria-label="Открыть чат смены" aria-expanded="false" title="Связь смены"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/></svg><span class="chat-unread" id="chatUnread" hidden>0</span></button>
+      <button class="btn btn-ghost btn-sm" id="engLogout" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>Выйти</button>
+    </div>
+  </header>
+
+  <main class="eng-main">
+    <section class="eng-hero">
+      <div class="eng-avatar" id="engAvatar">И</div>
+      <div class="eng-hero-copy">
+        <span class="eyebrow eng-eyebrow"><i class="live-dot"></i>Рабочий терминал инженера</span>
+        <h1 id="engName">Загрузка…</h1>
+        <p class="eng-sub" id="engSub">Подготавливаем рабочее место</p>
+      </div>
+      <div class="eng-hero-actions">
+        <button id="engShiftToggle" class="btn btn-primary shift-toggle" type="button" aria-pressed="false">Выйти на смену</button>
+      </div>
+    </section>
+
+    <section class="eng-stats" id="engStats" aria-label="Показатели смены"></section>
+
+    <section class="eng-grid">
+      <div class="eng-main-col">
+        <section class="eng-card eng-task-card">
+          <div class="eng-card-head"><div><span class="eyebrow">Назначение</span><h2>Текущая работа</h2><p id="engTaskHint">Активные назначения и этапы работы</p></div><span class="eng-live-dot" title="Синхронизация в реальном времени"></span></div>
+          <div id="engTasks"></div>
+        </section>
+        <section class="eng-card">
+          <div class="eng-card-head"><div><span class="eyebrow">Навигация</span><h2>Маршрут до борта</h2><p>Путь по рулёжным дорожкам</p></div><button class="btn btn-ghost btn-sm" type="button" id="routeOpen">Открыть карту</button></div>
+          <div class="eng-map-wrap"><svg id="engMap" viewBox="0 0 600 260" role="img" aria-label="Маршрут инженера"></svg><div class="eng-map-empty" id="engMapEmpty">Нет активного маршрута</div></div>
+        </section>
+      </div>
+      <aside class="eng-side">
+        <section class="eng-note"><div class="note-mark">15</div><div><b>Норматив прибытия — 15 минут</b><span>От создания заявки до прибытия на стоянку. Таймер в карточке задачи.</span></div></section>
+        <section class="eng-card"><div class="eng-card-head"><div><span class="eyebrow">Лента смены</span><h2>События</h2></div></div><div class="eng-events" id="engEvents"></div></section>
+        <section class="eng-card"><div class="eng-card-head"><div><span class="eyebrow">Закрытые работы</span><h2>История</h2></div></div><div id="engHistory"></div></section>
+        <section class="eng-profile">
+          <div class="avatar" id="engProfileMark">И</div>
+          <div><b id="engProfileName">Инженер</b><small>Полевой специалист</small></div>
+          <button class="btn btn-ghost btn-sm" type="button" id="newSession" title="Отдельное окно для второго аккаунта">Второй аккаунт</button>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <dialog id="shiftDlg" class="modal shift-dialog" aria-labelledby="shiftTitle">
+    <form method="dialog">
+      <header class="modal-head"><div><span class="eyebrow">Управление сменой</span><h2 id="shiftTitle">Завершить смену?</h2></div></header>
+      <div class="modal-body"><p id="shiftConfirmText">Подтвердите завершение работы на перроне.</p><p id="shiftError" class="form-message" role="alert" hidden></p></div>
+      <footer class="modal-foot"><button type="button" class="btn btn-ghost" id="shiftCancel">Остаться на смене</button><button type="button" class="btn danger" id="shiftConfirm">Завершить смену</button></footer>
+    </form>
+  </dialog>
+  <div id="engToast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <aside class="chat-panel glass" id="chatPanel" aria-label="Чат смены" hidden>
+    <header class="chat-head">
+      <div><span class="eyebrow">Командный канал</span><h2>Связь смены</h2></div>
+      <button id="chatClose" class="icon-btn" type="button" aria-label="Закрыть чат"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="chat-rooms" id="chatRooms" role="tablist" aria-label="Каналы связи"></div>
+    <div class="chat-conversation-head">
+      <div class="chat-peer"><b id="chatRoomName">Общий канал смены</b><span id="chatRoomState">Сообщения команды</span></div>
+      <button id="chatCall" type="button" class="icon-btn chat-call" aria-label="Позвонить собеседнику" title="Голосовой вызов"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></button>
+    </div>
+    <div class="chat-messages" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <div class="sticker-picker" id="stickerPicker" hidden></div>
+    <form id="chatForm" class="chat-form">
+      <input type="file" id="chatFileInput" hidden>
+      <button id="chatFileBtn" class="chat-tool" type="button" title="Прикрепить файл"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 6.5-6.5a4 4 0 0 1 5.7 5.7L10 21a6 6 0 0 1-8.5-8.5L11 3"/></svg></button>
+      <button id="chatStickerToggle" class="chat-tool" type="button" aria-label="Стикеры" title="Стикеры"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg></button>
+      <label class="sr-only" for="chatInput">Сообщение команде</label>
+      <textarea id="chatInput" rows="1" maxlength="2000" placeholder="Сообщение…"></textarea>
+      <button id="chatVoiceBtn" class="chat-tool chat-voice" type="button" title="Голосовое сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+      <button class="chat-send" type="submit" aria-label="Отправить сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
+  </aside>
+  <div class="chat-notice" id="chatNotice" role="status" aria-live="polite" hidden></div>
+
+  <dialog id="callDialog" class="call-dialog" aria-labelledby="callTitle">
+    <div class="call-avatar" aria-hidden="true"><span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span><svg viewBox="0 0 24 24"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></div>
+    <span class="eyebrow" id="callStatus">Защищённый канал</span>
+    <h2 id="callTitle">Голосовой вызов</h2>
+    <p id="callPeer">Собеседник</p>
+    <div class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div id="callTimer" class="call-timer" hidden>00:00</div>
+    <div class="call-actions" id="callIncomingActions"><button type="button" id="callAnswer" class="call-btn accept" aria-label="Ответить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg><span>Ответить</span></button><button type="button" id="callDecline" class="call-btn decline" aria-label="Отклонить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg><span>Отклонить</span></button></div>
+    <div class="call-actions" id="callActiveActions" hidden><button type="button" id="callMute" class="call-btn mute" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg><span>Микрофон</span></button><button type="button" id="callHangup" class="call-btn decline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c5-5 13-5 18 0l-2 3-4-1v-3a10 10 0 0 0-6 0v3l-4 1z"/></svg><span>Завершить</span></button></div>
+    <audio id="remoteAudio" autoplay playsinline></audio>
+  </dialog>
+
+  <script src="/static/desktop.js?v=4.0"></script><script src="/static/bridge.js?v=4.0"></script><script src="/static/chat.js?v=4.0"></script><script src="/static/engineer.js?v=4.0"></script><script src="/static/window-controls.js?v=4.0"></script>
+</body>
+</html>

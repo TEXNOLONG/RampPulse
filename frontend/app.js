@@ -34,7 +34,8 @@ const mapMotion = new Map();
 let mapMotionFrame = 0;
 const mapReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 let mapBounds = null, mapPanFrame = 0, pendingMapPan = null;
-let mapRouteSignature = '', mapAltSignature = '';
+let mapRouteSignature = '', mapAltSignature = '', mapBlockedSignature = '';
+let mapSegments = [];
 let vb = {x: 0, y: 0, w: 1, h: 1};
 const bootStartedAt = performance.now();
 let moveTechMode = false;
@@ -319,45 +320,51 @@ function buildMap() {
 
   (AIR.areas || []).forEach(a => {
     const p = el('polygon', {points: a.points.map(q => q.join(',')).join(' '), class: 'area-' + a.kind}, gA);
-    p.setAttribute('stroke-width', 4);
     el('title', {}, p).textContent = a.name || a.kind;
-    if (a.name && ['terminal', 'hangar'].includes(a.kind) && a.points.length) {
+    if (a.name && ['terminal'].includes(a.kind) && a.points.length) {
       const cx = a.points.reduce((sum, q) => sum + q[0], 0) / a.points.length;
       const cy = a.points.reduce((sum, q) => sum + q[1], 0) / a.points.length;
       el('text', {class: 'map-area-label', x: cx, y: cy}, gLabels).textContent = a.name;
     }
   });
-  (AIR.parking || []).forEach(p => {
-    el('polygon', {points: p.points.map(q => q.join(',')).join(' '), class: 'parking'}, gP);
-  });
+  // 600+ parking outlines → one path (one paint call instead of hundreds of nodes)
+  const parkD = (AIR.parking || []).map(p => 'M' + p.points.map(q => q[0] + ' ' + q[1]).join('L') + 'Z').join('');
+  if (parkD) el('path', {d: parkD, class: 'parking'}, gP);
   (AIR.runways || []).forEach(r => {
     const pts = r.points.map(q => q.join(',')).join(' ');
     el('polyline', {points: pts, class: 'rwy', 'stroke-width': r.width || 45}, gR);
-    el('polyline', {points: pts, class: 'rwy-mark', 'stroke-width': 4}, gR);
-    el('title', {}, gR.lastChild).textContent = 'ВПП ' + (r.name || '');
+    el('polyline', {points: pts, class: 'rwy-mark', 'stroke-width': 3}, gR);
     if (r.name && r.points.length) {
       const center = r.points[Math.floor(r.points.length / 2)];
-      el('text', {class: 'map-runway-label', x: center[0], y: center[1] - 35}, gLabels).textContent = `ВПП ${r.name}`;
+      el('text', {class: 'map-runway-label', x: center[0], y: center[1] - 40}, gLabels).textContent = `ВПП ${r.name}`;
     }
   });
+  // taxiway network: two merged paths (base + glow centre line); hit-testing is geometric
+  mapSegments = [];
+  let taxiD = '';
   AIR.edges.forEach(e => {
     const a = N[e.a], b = N[e.b];
-    const line = el('line', {x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: 'edge ' + (e.kind || ''),
-      'stroke-width': e.kind === 'apron' ? 22 : 30}, gE);
-    el('title', {}, line).textContent = (e.name ? 'РД ' + e.name : e.id) + ', ' + Math.round(e.length) + ' м';
-    el('line', {x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: 'edge-hit', 'data-edge': e.id}, gE);
-    mapEl.edges[e.id] = line;
+    if (!a || !b) return;
+    taxiD += `M${a.x} ${a.y}L${b.x} ${b.y}`;
+    mapSegments.push({id: e.id, ax: a.x, ay: a.y, bx: b.x, by: b.y, name: e.name, length: e.length});
   });
+  el('path', {d: taxiD, class: 'taxi-base'}, gE);
+  el('path', {d: taxiD, class: 'taxi-glow'}, gE);
+  el('g', {id: 'blockedEdges'}, gE);
+  mapBlockedSignature = '';
   AIR.bases.forEach(b => {
     const n = N[b.node], g = el('g', {class: 'base', transform: `translate(${n.x},${n.y})`}, gB);
-    el('rect', {x: -28, y: -28, width: 56, height: 56}, g);
-    el('text', {y: 82}, g).textContent = b.name;
+    const m = el('g', {class: 'mk'}, g);
+    el('rect', {class: 'base-dot', x: -7, y: -7, width: 14, height: 14, rx: 4}, m);
+    el('rect', {class: 'base-core', x: -2.5, y: -2.5, width: 5, height: 5, rx: 1.5}, m);
+    el('text', {y: 22}, m).textContent = b.name;
   });
   AIR.stands.forEach(s => {
     const n = N[s.node], g = el('g', {class: 'stand', 'data-stand': s.id, transform: `translate(${n.x},${n.y})`}, gS);
-    el('rect', {class: 'ring', x: -42, y: -56, width: 84, height: 112, rx: 3}, g);
-    // Live aircraft are rendered in #aircraft; static stand planes duplicated them.
-    el('text', {class: 'stand-label', y: 70}, g).textContent = s.id;
+    const m = el('g', {class: 'mk'}, g);
+    el('rect', {class: 'slot', x: -15, y: -15, width: 30, height: 30, rx: 8}, m);
+    el('rect', {class: 'tick', x: -1, y: -15, width: 2, height: 5, rx: 1}, m);
+    el('text', {class: 'stand-label', y: 29}, m).textContent = s.id.replace('ВС-', '');
     el('title', {}, g).textContent = 'Стоянка ' + s.id;
     mapEl.stands[s.id] = g;
   });
@@ -369,50 +376,96 @@ function buildMap() {
   }
 }
 function techEl(t, parent) {
-  const g = el('g', {class: 'tech', 'data-tech': t.id}, parent || $('#techs'));
-  el('circle', {class: 'tech-halo', r: 24, fill: QCOL[t.qual]}, g);
-  el('path', {class: 'tech-person', d: 'M0 -9a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm-10 15v-3a10 10 0 0 1 20 0v3Z'}, g);
-  el('circle', {class: 'tech-status', cx: 17, cy: -17, r: 5}, g);
-  el('text', {class: 'tech-number', x: 0, y: 22}, g).textContent = t.id;
+  const g = el('g', {class: 'tech', 'data-tech': t.id, style: `--q:${QCOL[t.qual] || '#A1A1AA'}`}, parent || $('#techs'));
+  const m = el('g', {class: 'mk'}, g);
+  el('circle', {class: 'tech-glow', r: 15}, m);
+  el('circle', {class: 'tech-halo', r: 11}, m);
+  el('text', {class: 'tech-number', y: 3.6}, m).textContent = t.id;
+  el('circle', {class: 'tech-status', cx: 8.5, cy: -8.5, r: 3.6}, m);
   el('title', {}, g).textContent = `${t.name}, ${t.qual}, ${t.speed} м/с`;
   mapEl.techs[t.id] = g;
   return g;
 }
+const PLANE_PX = 'M0,-17 C1.4,-17 2.1,-14 2.1,-11 L2.1,-4 L15,3 L15,5.5 L2.1,2 L1.6,10 L5.5,13 L5.5,15 L0,13.6 L-5.5,15 L-5.5,13 L-1.6,10 L-2.1,2 L-15,5.5 L-15,3 L-2.1,-4 L-2.1,-11 C-2.1,-14 -1.4,-17 0,-17 Z';
 function aircraftEl(a, parent) {
   const g = el('g', {class: 'aircraft ' + a.status, 'data-aircraft': a.id}, parent || $('#aircraft'));
-  el('path', {class: 'ac-plane', d: PLANE, transform: 'scale(0.58)'}, g);
-  el('text', {class: 'ac-label', y: -55}, g).textContent = a.flight;
+  const m = el('g', {class: 'mk'}, g);
+  el('path', {class: 'ac-plane', d: PLANE_PX}, m);
   el('title', {}, g).textContent = `${a.flight} ${a.model} — ${a.status_ru}${a.stand ? ' (' + a.stand + ')' : ''}`;
   mapEl.aircraft[a.id] = g;
   return g;
 }
 function gseEl(g, parent) {
   const grp = el('g', {class: 'gse ' + g.status, 'data-gse': g.id}, parent || $('#gse'));
-  el('rect', {class: 'gse-body', x: -18, y: -12, width: 36, height: 24, rx: 4,
-              fill: g.color}, grp);
-  el('text', {class: 'gse-label', y: 3}, grp).textContent = g.short;
+  const m = el('g', {class: 'mk'}, grp);
+  el('rect', {class: 'gse-body', x: -7, y: -4.5, width: 14, height: 9, rx: 2.5, fill: g.color}, m);
   el('title', {}, grp).textContent = `${g.label} — ${g.status_ru}`;
   mapEl.gse[g.id] = grp;
   return grp;
 }
 function vehicleEl(v, parent) {
   const grp = el('g', {class: 'engineer-vehicle ' + v.status, 'data-vehicle': v.id}, parent || $('#engineerVehicles'));
-  el('path', {class: 'engineer-vehicle-shadow', d: 'M-19 -5 L-14 -14 Q-12 -18 -7 -18 H8 Q13 -18 15 -13 L20 -5 V10 Q20 13 17 13 H-16 Q-19 13 -19 10 Z'}, grp);
-  el('path', {class: 'engineer-vehicle-body', d: 'M-16 -5 L-12 -13 Q-11 -15 -7 -15 H7 Q10 -15 12 -12 L16 -5 V8 H-16 Z'}, grp);
-  el('path', {class: 'engineer-vehicle-glass', d: 'M-9 -12 H-2 V-6 H-13 Z M1 -12 H7 Q9 -12 10 -9 L12 -6 H1 Z'}, grp);
-  el('rect', {class: 'engineer-vehicle-wheel', x: -14, y: 8, width: 6, height: 4, rx: 1.5}, grp);
-  el('rect', {class: 'engineer-vehicle-wheel', x: 8, y: 8, width: 6, height: 4, rx: 1.5}, grp);
-  el('circle', {class: 'engineer-vehicle-beacon', cx: 0, cy: -17, r: 2}, grp);
-  el('text', {class: 'engineer-vehicle-label', x: 0, y: 25}, grp).textContent = `М${v.id}`;
+  const m = el('g', {class: 'mk'}, grp);
+  el('rect', {class: 'veh-body', x: -6, y: -10, width: 12, height: 20, rx: 4}, m);
+  el('rect', {class: 'veh-glass', x: -4, y: -6, width: 8, height: 4, rx: 1.5}, m);
   el('title', {}, grp).textContent = `${v.name} · ${v.status_ru}`;
   mapEl.vehicles[v.id] = grp;
   return grp;
 }
+function nearestEdge(x, y, maxDist) {
+  let best = null, bestD = maxDist * maxDist;
+  for (const s of mapSegments) {
+    const dx = s.bx - s.ax, dy = s.by - s.ay;
+    const len = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - s.ax) * dx + (y - s.ay) * dy) / len));
+    const px = s.ax + t * dx - x, py = s.ay + t * dy - y;
+    const d = px * px + py * py;
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+function renderBlockedEdges() {
+  const g = $('#blockedEdges');
+  if (!g || !S) return;
+  const sig = (S.blocked || []).join('|');
+  if (sig === mapBlockedSignature) return;
+  mapBlockedSignature = sig;
+  g.replaceChildren();
+  const ids = new Set(S.blocked || []);
+  for (const s of mapSegments) if (ids.has(s.id)) el('line', {class: 'blocked-edge', x1: s.ax, y1: s.ay, x2: s.bx, y2: s.by}, g);
+}
 function applyVB() {
   const m = $('#map');
-  if (m) m.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  if (m) {
+    m.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+    const box = mapBounds || m.getBoundingClientRect();
+    if (box && box.width) m.style.setProperty('--mk', Math.max(vb.w / box.width, vb.h / box.height).toFixed(4));
+  }
   updateMapZoomClass(m);
   updateMapScale();
+}
+let flyFrame = 0;
+function flyTo(x, y, w, h) {
+  const m = $('#map'); if (!m) return;
+  const box = mapBounds || m.getBoundingClientRect();
+  if (!box.width) return;
+  // keep the target clear of the queue overlay chrome and detail panel
+  const usableW = box.width - (document.body.classList.contains('detail-open') ? 420 : 0) - 60;
+  const usableH = box.height - 200;
+  const scale = Math.max(w / Math.max(200, usableW), h / Math.max(200, usableH));
+  const tw = box.width * scale, th = box.height * scale;
+  const cx = x + w / 2 + (box.width - usableW - 60) / 2 * scale, cy = y + h / 2 - 20 * scale;
+  const to = {x: cx - tw / 2, y: cy - th / 2, w: tw, h: th}, from = {...vb};
+  if (mapReducedMotion.matches) { vb = to; applyVB(); return; }
+  cancelAnimationFrame(flyFrame);
+  const t0 = performance.now(), dur = 700;
+  const step = now => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    vb = {x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e, w: from.w + (to.w - from.w) * e, h: from.h + (to.h - from.h) * e};
+    applyVB();
+    if (k < 1) flyFrame = requestAnimationFrame(step);
+  };
+  flyFrame = requestAnimationFrame(step);
 }
 function updateMapZoomClass(map = $('#map')) {
   if (!map || !AIR) return;
@@ -501,7 +554,6 @@ function initMapEvents() {
 
     const t = document.elementFromPoint(ev.clientX, ev.clientY);
     const acEl = t && t.closest('[data-aircraft]');
-    const edge = t && t.closest('[data-edge]');
     const st   = t && t.closest('[data-stand]');
 
     if (acEl) {
@@ -519,11 +571,25 @@ function initMapEvents() {
       return;
     }
     if (role !== 'dispatcher') return;
-    if (st) openDialog(st.getAttribute('data-stand'));
-    else if (edge) {
-      const id = edge.getAttribute('data-edge');
-      api(`/api/edges/${id}/block`, {blocked: !S.blocked.includes(id)}).catch(() => {});
-    } else { selAircraft = null; selReq = null; selTech = null; selVehicle = null; render(); }
+    const techNode = t && t.closest('[data-tech]');
+    if (techNode) {
+      const id = +techNode.dataset.tech;
+      selTech = selTech === id ? null : id;
+      selReq = null; selAircraft = null; selVehicle = null;
+      render();
+      return;
+    }
+    if (st) { openDialog(st.getAttribute('data-stand')); return; }
+    const p = svgPoint(ev);
+    const k = mapBounds?.width ? vb.w / mapBounds.width : 2;
+    const edge = nearestEdge(p.x, p.y, 6 * k);
+    if (edge) {
+      const wasBlocked = S.blocked.includes(edge.id);
+      api(`/api/edges/${edge.id}/block`, {blocked: !wasBlocked})
+        .then(() => toast(`РД ${edge.name || edge.id} ${wasBlocked ? 'открыта' : 'перекрыта'}`)).catch(() => {});
+      return;
+    }
+    selAircraft = null; selReq = null; selTech = null; selVehicle = null; render();
   });
   const zi = $('#zin'); if (zi) zi.onclick = () => Map3D.isActive() ? Map3D.zoom(0.8) : zoom(0.8);
   const zo = $('#zout'); if (zo) zo.onclick = () => Map3D.isActive() ? Map3D.zoom(1.25) : zoom(1.25);
@@ -634,7 +700,7 @@ function initMapEvents() {
         $('#tgProfileTitle').textContent = newName;
         $('#tgProfileSubtitle').textContent = `@${newUname} · в сети`;
         const hdrName = $('#headerProfileName');
-        if (hdrName) hdrName.textContent = `@${newUname}`;
+        if (hdrName) hdrName.textContent = newName.trim().slice(0, 1).toUpperCase();
         const ua = $('#userAvatar');
         if (ua) {
           ua.textContent = newName.slice(0, 1).toUpperCase();
@@ -818,7 +884,7 @@ function renderMap() {
     }
   }
 
-  for (const id in mapEl.edges) mapEl.edges[id].classList.toggle('blocked', S.blocked.includes(id));
+  renderBlockedEdges();
   renderTacticalOverlay();
   const hot = {};
   S.active.forEach(q => { if (!hot[q.stand] || q.priority === 'emergency') hot[q.stand] = q.priority; });
@@ -1106,17 +1172,10 @@ function renderDemoTelemetry() {
   if (savedNode) savedNode.textContent = fmt(saved);
   const note = $('#demoSavings');
   if (note) {
-    const request = (S.active || []).find(item => item.id === selReq) || (S.active || [])[0];
-    const tech = request && (S.techs || []).find(item => item.id === request.tech_id);
-    const stand = request && (AIR.stands || []).find(item => item.id === request.stand);
-    const point = stand && (AIR.nodes || []).find(item => item.id === stand.node);
-    if (!request || !tech || !point || !Number.isFinite(Number(request.eta))) note.textContent = 'Выберите заявку с назначенным инженером';
-    else {
-      const directMinutes = Math.hypot(tech.x - point.x, tech.y - point.y) / Math.max(.1, Number(tech.speed || 1.3)) / 60;
-      const optimizedMinutes = Number(request.eta) / 60;
-      const saving = Math.max(0, directMinutes - optimizedMinutes);
-      note.textContent = `Расчётная разница · ${saving.toFixed(1)} мин`;
-    }
+    if (comparison) {
+      const delta = comparison.manualEta - comparison.systemEta;
+      note.textContent = delta >= 0 ? `−${delta.toFixed(1)} мин против «${comparison.manualName}»` : `назначенный быстрее на ${Math.abs(delta).toFixed(1)} мин`;
+    } else note.textContent = selReq ? 'Расчёт маршрутов…' : 'Выберите заявку';
   }
 }
 function renderTacticalOverlay() {
@@ -1134,9 +1193,18 @@ function renderTacticalOverlay() {
     if (point) {
       const radius = 1260; // 15 min at a conservative 1.4 m/s, in airport graph metres.
       el('circle', {class:'isochrone-ring', cx:point.x, cy:point.y, r:radius}, iso);
-      el('circle', {class:'isochrone-inner', cx:point.x, cy:point.y, r:radius * .72}, iso);
-      el('text', {class:'isochrone-label', x:point.x + 18, y:point.y - radius + 32}, iso).textContent = 'ЗОНА 15:00';
+      el('circle', {class:'isochrone-inner', cx:point.x, cy:point.y, r:radius * .5}, iso);
+      const tag = el('g', {transform:`translate(${point.x} ${point.y - radius})`}, iso);
+      const m = el('g', {class:'mk'}, tag);
+      el('rect', {class:'iso-tag', x:-46, y:-12, width:92, height:24, rx:12}, m);
+      el('text', {class:'isochrone-label', y:4}, m).textContent = 'ЗОНА 15:00';
+      flyTo(point.x - radius * 1.08, point.y - radius * 1.08, radius * 2.16, radius * 2.16);
     }
+  }
+  const inZone = new Set((request?.candidates || []).filter(c => c.eta != null && c.eta <= NORM).map(c => c.tech_id));
+  for (const id in mapEl.techs) {
+    mapEl.techs[id].classList.toggle('in-zone', !!request && inZone.has(+id));
+    mapEl.techs[id].classList.toggle('out-zone', !!request && !inZone.has(+id) && +id !== request.tech_id);
   }
   const enabled = document.body.classList.contains('comparison-on');
   const tech = request && (S.techs || []).find(item => item.id === request.tech_id);
@@ -1154,10 +1222,16 @@ function renderTacticalOverlay() {
   const systemPoints = comparison?.systemPoints || ((tech.route || []).length > 1 ? tech.route : [start, target]);
   el('polyline', {class:'demo-route-human', points:humanPoints.map(pair => pair.join(',')).join(' ')}, demo);
   el('polyline', {class:'demo-route-system', points:systemPoints.map(pair => pair.join(',')).join(' ')}, demo);
-  const humanLabel = el('text', {class:'demo-route-label human', x:start[0] + 14, y:start[1] - 12}, demo);
-  humanLabel.textContent = comparison ? `ВЫБОР НА ГЛАЗ · ${comparison.manualName}` : 'МОДЕЛЬНЫЙ ВЫБОР · ИНЖЕНЕР';
-  const systemLabel = el('text', {class:'demo-route-label system', x:target[0] + 20, y:target[1] + 27}, demo);
-  systemLabel.textContent = 'АЛГОРИТМ · ПУТЬ ПО РД';
+  const label = (x, y, cls, text) => {
+    const g = el('g', {transform:`translate(${x} ${y})`}, demo);
+    const m = el('g', {class:'mk'}, g);
+    const w = text.length * 6.6 + 20;
+    el('rect', {class:'demo-tag ' + cls, x:12, y:-24, width:w, height:22, rx:11}, m);
+    el('text', {class:'demo-route-label ' + cls, x:22, y:-9}, m).textContent = text;
+  };
+  const mid = humanPoints[Math.floor(humanPoints.length / 2)] || start;
+  label(mid[0], mid[1], 'human', comparison ? `НА ГЛАЗ · ${comparison.manualName} · ${comparison.manualEta.toFixed(1)} мин` : 'ВЫБОР НА ГЛАЗ');
+  label(target[0], target[1], 'system', comparison ? `АЛГОРИТМ · ${comparison.systemEta.toFixed(1)} мин` : 'АЛГОРИТМ · ПУТЬ ПО РД');
 }
 function pathLength(points) {
   let length = 0;
@@ -1221,7 +1295,8 @@ async function runDemoScenario(number, button) {
   const buttons = [...document.querySelectorAll('[data-demo]')];
   buttons.forEach(item => item.disabled = true);
   const label = button.innerHTML;
-  button.textContent = 'ЗАПУСК…';
+  button.setAttribute('aria-busy', 'true');
+  const menu = button.closest('details'); if (menu) menu.open = false;
   try {
     const inUse = new Set((S.active || []).map(request => request.stand));
     const stands = (AIR.stands || []).filter(item => !inUse.has(item.id));
@@ -1264,7 +1339,7 @@ async function runDemoScenario(number, button) {
     console.error('Не удалось запустить сценарий', error);
   } finally {
     buttons.forEach(item => item.disabled = false);
-    button.innerHTML = label;
+    button.innerHTML = label; button.removeAttribute('aria-busy');
   }
 }
 
@@ -1678,6 +1753,7 @@ function initUI() {
     const un = $('#userName'); if (un) un.textContent = name;
     const ua = $('#userAvatar'); if (ua) ua.textContent = avatar;
     const footerAvatar = $('#userAvatarFooter'); if (footerAvatar) footerAvatar.textContent = avatar;
+    const headerAvatar = $('#headerProfileName'); if (headerAvatar) headerAvatar.textContent = avatar;
     const ur = $('#userRole'); if (ur) ur.textContent = 'диспетчер смены';
     const chip = $('#userChip'); if (chip) chip.title = `${ME.email} · диспетчер`;
   }

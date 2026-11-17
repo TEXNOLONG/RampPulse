@@ -1,137 +1,271 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#0A0E17"><title>RampPulse · Операционный центр</title><link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/rampulse-ui.css?v=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09090B">
+  <title>RampPulse · Операционный центр</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/rp.css?v=4.0">
 </head>
 <body class="dispatcher">
   <button class="app-window-close" type="button" data-close-app title="Закрыть приложение" aria-label="Закрыть приложение"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg></button>
-<section class="boot-screen video-only" id="bootScreen" role="status" aria-live="polite" aria-label="Запуск RampPulse">
-  <video class="flight-video" autoplay muted loop playsinline preload="auto" aria-hidden="true"><source src="/static/assets/oto-splash.webm" type="video/webm"></video>
-  <div class="flight-hud" aria-hidden="true"><div class="flight-hud-group"><span>RampPulse / SVO</span><span>55°58′N&nbsp; 037°24′E</span></div><div class="flight-hud-group"><span class="flight-signal">СВЯЗЬ · АКТИВНА</span><span>UTC+03</span></div></div>
-  <div class="flight-frame"><div class="flight-brand"><svg class="flight-brand-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="1" opacity=".45"/><circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="1" opacity=".35"/><path d="M16 16 26 8" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="16" cy="16" r="1.5" fill="currentColor"/></svg><div><div class="flight-brand-title">RampPulse · ОПЕРАЦИОННЫЙ ЦЕНТР</div><div class="flight-brand-subtitle">АЭРОПОРТОВЫЕ СЛУЖБЫ · UUEE</div></div></div>
-  <div class="flight-copy"><span class="flight-kicker" id="bootStatus">PRE-FLIGHT CHECK: Инициализация систем…</span><h1>Операционная смена</h1><p>Загружаем службы и данные аэропорта</p></div>
-  <div class="boot-progress" role="progressbar" aria-label="Готовность систем" aria-valuemin="0" aria-valuemax="100" aria-valuenow="8"><span id="bootProgress" style="transform:scaleX(.08)"></span></div>
-  <div class="boot-stages" id="bootStages" aria-hidden="true"><span data-stage="0" class="active">PRE-FLIGHT</span><i></i><span data-stage="1">RADAR</span><i></i><span data-stage="2">CABIN</span><i></i><span data-stage="3">TAKEOFF</span></div>
-  <div class="boot-foot"><span>СИСТЕМА <strong>НОРМА</strong></span><span>ДАННЫЕ <strong>ЛОКАЛЬНО</strong></span><span>ЗАГРУЗКА <strong id="bootProgressPercent">08%</strong></span></div>
-  <button class="boot-retry" id="bootRetry" type="button" hidden>Повторить запуск</button>
-  </div>
-</section>
+
+  <!-- Boot -->
+  <section class="boot-screen" id="bootScreen" role="status" aria-live="polite" aria-label="Запуск RampPulse">
+    <video class="boot-video" autoplay muted loop playsinline preload="auto" aria-hidden="true"><source src="/static/assets/oto-splash.webm" type="video/webm"></video>
+    <div class="boot-card">
+      <div class="boot-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="21"/><circle cx="24" cy="24" r="13"/><path class="boot-sweep" d="M24 24 L24 3"/><circle cx="24" cy="24" r="2.4" class="dot"/></svg></div>
+      <div class="boot-word">RampPulse</div>
+      <span class="boot-status" id="bootStatus">Инициализация систем…</span>
+      <div class="boot-progress" role="progressbar" aria-label="Готовность систем" aria-valuemin="0" aria-valuemax="100" aria-valuenow="8"><span id="bootProgress" style="transform:scaleX(.08)"></span></div>
+      <div class="boot-stages" id="bootStages" aria-hidden="true"><span data-stage="0" class="active">PRE-FLIGHT</span><span data-stage="1">RADAR</span><span data-stage="2">CABIN</span><span data-stage="3">TAKEOFF</span></div>
+      <strong class="boot-percent" id="bootProgressPercent">08%</strong>
+      <button class="boot-retry" id="bootRetry" type="button" hidden>Повторить запуск</button>
+    </div>
+  </section>
+
   <a class="skip-link" href="#map">Перейти к карте аэропорта</a>
+
   <div class="app-shell">
+    <!-- Rail -->
     <aside class="app-rail" aria-label="Навигация">
-      <a class="rail-brand" href="/" aria-label="RampPulse · Главная">RP</a><span class="rail-workspace-label">SVO</span>
+      <a class="rail-brand" href="/" aria-label="RampPulse · Главная"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 12 18 6"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg></a>
       <nav class="rail-nav" aria-label="Разделы">
-        <button class="on" type="button" data-rail-tab="active" aria-label="Заявки" aria-current="page" title="Заявки"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg></button>
-        <button type="button" data-rail-tab="flights" aria-label="Рейсы" title="Рейсы"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 13 7-2  -3-6 2-.5 5 6 5-1a2 2 0 1 1 1 4l-5 1-1.5 7-2 .5-.5-7L4 17z"/></svg></button>
-        <button type="button" data-rail-tab="techs" aria-label="Команда" title="Команда"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M17 5a3 3 0 0 1 0 6m1 3a4 4 0 0 1 3 4v2h-3"/></svg></button>
-        <button type="button" data-rail-tab="log" aria-label="Журнал" title="Журнал"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></button>
-      </nav><div class="rail-spacer"></div><button class="rail-utility" type="button" data-rail-settings aria-label="Настройки" title="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19 13 2 1-2 4-2-.2-2 1.2-.8 2h-4l-.8-2-2-1.2-2 .2-2-4 1-1.7v-2L4 8l2-3 2 .3 2-1 1-2h3l1 2 2 1 2-.3 2 3-1 2z"/></svg></button><div class="rail-user" id="userAvatar" aria-label="Текущий пользователь">Д</div>
+        <button class="on" type="button" data-rail-tab="active" aria-label="Заявки" aria-current="page" data-tip="Заявки"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+        <button type="button" data-rail-tab="flights" aria-label="Рейсы" data-tip="Рейсы"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2l-1.3 1.3 6.7 3.9-3.3 3.3-2.6-.4-1 1 3.4 1.9 1.9 3.4 1-1-.4-2.6 3.3-3.3 3.9 6.7z"/></svg></button>
+        <button type="button" data-rail-tab="techs" aria-label="Команда" data-tip="Команда"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.5A6.5 6.5 0 0 1 21.5 20"/></svg></button>
+        <button type="button" data-rail-tab="log" aria-label="Журнал" data-tip="Журнал"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></button>
+      </nav>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" type="button" data-rail-settings aria-label="Настройки" data-tip="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+      <button class="rail-user" id="userAvatar" type="button" aria-label="Профиль">Д</button>
     </aside>
+
+    <!-- Queue -->
     <aside class="left-panel" id="leftPanel" aria-label="Рабочая очередь">
-      <header class="sidebar-heading"><div class="sidebar-overline">ОПЕРАЦИОННЫЙ ЦЕНТР</div><div class="sidebar-title-row"><h1>Очередь смены</h1><span class="connection-state" id="conn" aria-label="Связь с сервером" title="Связь с сервером"></span></div><p id="airportName" class="sidebar-airport">Шереметьево · SVO</p></header>
-      <div class="sidebar-actions"><button class="primary dispatcher-only" id="newBtn" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Новая заявка</button><button class="secondary dispatcher-only" id="newAcBtn" type="button" aria-label="Добавить входящий рейс" title="Добавить рейс"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 11 6-1.5L6.5 4l1.7-.4 4.1 4.8 4.2-1.1a1.5 1.5 0 1 1 .7 2.9l-4.2 1.1-1.3 6.3-1.7.4-.2-6.2L3.8 13z"/></svg></button></div>
-      <label class="queue-search" for="queueSearch"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="queueSearch" type="search" placeholder="Поиск по очереди" autocomplete="off"><kbd>/</kbd></label>
-      <nav class="tabs" id="tabs" aria-label="Очередь смены"><button type="button" data-tab="active" class="on" aria-current="page"><span>Заявки</span><span class="tab-count" id="cActive"></span></button><button type="button" data-tab="flights"><span>Рейсы</span><span class="tab-count" id="cFlights"></span></button><button type="button" data-tab="techs"><span>Команда</span><span class="tab-count" id="cReg"></span></button><button type="button" data-tab="log"><span>Журнал</span></button></nav>
-      <div class="pane on" id="pane-active"></div><div class="pane" id="pane-flights"></div><div class="pane" id="pane-techs"></div><div class="pane" id="pane-log"></div>
-      <footer class="sidebar-footer"><div class="profile-mark" id="userAvatarFooter">Д</div><div class="profile-copy"><b id="userName">Диспетчер</b><span id="userRole">диспетчер смены</span></div><button class="user-logout" id="logoutBtn" type="button" aria-label="Выйти из аккаунта">Выйти из аккаунта</button></footer>
-    </aside>
-    <main class="workspace" aria-label="Рабочая карта">
-      <header class="top"><div class="workspace-heading"><span class="workspace-kicker">ПЕРОН · SVO / UUEE</span><h2 id="workspaceTitle">Обзор смены</h2></div><section class="stats" id="stats" aria-label="Сводка смены"></section><div class="controls"><span class="llm-pill" id="llmPill" title="Генератор карточек рейсов">Генератор <b id="llmModel">—</b></span><label class="speed-control"><span>Шаг</span><select id="speed" class="dispatcher-only" aria-label="Скорость модельного времени"><option value="1">×1</option><option value="5">×5</option><option value="10" selected>×10</option><option value="30">×30</option><option value="60">×60</option></select></label><button id="simToggle" class="sim-toggle" type="button" aria-pressed="true" aria-label="Приостановить симуляцию"><svg class="sim-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4.5v11M13 4.5v11"/></svg><svg class="sim-play" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 9 5.5-9 5.5z"/></svg><span id="simToggleText">Пауза</span></button><button class="header-profile-btn" id="headerProfileBtn" type="button" title="Профиль и настройки" style="display:inline-flex; align-items:center; gap:6px; background:#1e293b; border:1px solid #334155; border-radius:16px; padding:4px 10px; color:#f8fafc; font-size:12px; cursor:pointer;"><span class="header-avatar-dot" style="width:18px; height:18px; border-radius:50%; background:#2aabee; color:#fff; display:grid; place-items:center; font-size:10px; font-weight:bold;"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg></span><span id="headerProfileName">Профиль</span></button><button class="app-settings" id="appSettings" type="button" aria-label="Настройки приложения" title="Настройки"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19 13 1 2-2 3-2-.2-2 1-1 2h-3l-1-2-2-1-2 .2-2-3 1-2v-2l-1-2 2-3 2 .2 2-1 1-2h3l1 2 2 1 2-.2 2 3-1 2z"/></svg></button><button class="chat-toggle" id="chatToggle" type="button" aria-label="Открыть чат смены" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/><path d="M8 11h8M8 14h5"/></svg><span class="chat-unread" id="chatUnread" hidden>0</span></button><button class="header-logout" type="button" data-logout-trigger>Выйти</button></div></header>
-      <section class="demo-console" aria-label="Демо и телеметрия">
-        <div class="demo-console-main"><div class="demo-console-title"><b>ДЕМО · ТЕЛЕМЕТРИЯ</b><span>A-CDM / SVO · LIVE</span></div><div class="demo-kpis" aria-live="polite"><div class="demo-kpi"><strong class="demo-kpi-value" id="demoAvg">—</strong><span class="demo-kpi-label">среднее прибытие · мин</span></div><div class="demo-kpi"><strong class="demo-kpi-value" id="demoSla">—</strong><span class="demo-kpi-label">в нормативе 15 мин</span></div><div class="demo-kpi"><strong class="demo-kpi-value" id="demoSaved">—</strong><span class="demo-kpi-label">выигрыш системы · мин</span></div></div></div>
-        <div class="demo-console-side"><span class="demo-live"><i></i>СИСТЕМА АКТИВНА</span><button type="button" id="demoCompare" class="compare-toggle" aria-pressed="false"><span>Человек vs система</span><i class="compare-track"></i></button></div>
-        <nav class="demo-presets" aria-label="Демо-сценарии"><span class="demo-presets-label">ЗАПУСТИТЬ СЦЕНАРИЙ</span><button class="demo-preset" type="button" data-demo="1"><i class="demo-preset-index">01</i>Штатный вызов</button><button class="demo-preset" type="button" data-demo="2"><i class="demo-preset-index">02</i>Перекрытие РД</button><button class="demo-preset" type="button" data-demo="3"><i class="demo-preset-index">03</i>Пиковая нагрузка</button><button class="demo-preset" type="button" data-demo="4"><i class="demo-preset-index">04</i>Дефицит квалификации</button><button class="demo-preset" type="button" data-demo="5"><i class="demo-preset-index">05</i>Сравнение маршрутов</button></nav>
-        <aside class="demo-comparison-note" id="demoComparisonNote"><b>Сравнение времени прибытия</b><span>Назначенный инженер и доступная альтернатива</span><br><strong id="demoSavings">Расчёт после выбора заявки</strong></aside>
-      </section>
-      <section class="map-stage" aria-label="Карта аэропорта"><svg id="map" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Интерактивная карта перрона Шереметьево"></svg><canvas id="map3d" hidden aria-label="3D-карта перрона"></canvas><div class="map-vignette" aria-hidden="true"></div><div class="map-hud"><span class="map-live offline" id="mapLive" aria-live="polite"><i></i><b id="mapLiveText">СВЯЗЬ…</b></span><span class="map-hud-divider"></span><span class="map-hud-airport" id="mapHudAirport">SVO · UUEE</span><span class="map-hud-fleet" id="vehicleCount">Транспорт · загрузка…</span></div><div class="legend" id="legend" aria-label="Обозначения карты"><span><i style="background:var(--glider)"></i>Планер</span><span><i style="background:var(--engine)"></i>Двигатель</span><span><i style="background:var(--avionics)"></i>Авионика</span><span class="sep"></span><span><i style="background:var(--yellow)"></i>Маршрут</span><span><i style="background:var(--red)"></i>ЧС</span></div><div class="map-scale"><div class="map-north" title="Север"><svg viewBox="0 0 20 28" aria-hidden="true"><path d="M10 2 4 17l6-3 6 3L10 2Z"/><path d="M10 14v11"/></svg><span>N</span></div><span class="map-scale-rule" id="mapScaleLine"></span><b id="mapScaleLabel">—</b></div><div class="map-tools" aria-label="Управление картой"><button id="view3d" type="button" aria-label="Переключить 2D / 3D">3D</button><button id="zin" type="button" aria-label="Приблизить">+</button><button id="zout" type="button" aria-label="Отдалить">−</button><button id="zfit" type="button" aria-label="Показать весь аэропорт"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.5 10 8.5-7 8.5 7M5.5 9v11h13V9M9.5 20v-6h5v6"/></svg></button></div><button class="mobile-menu" id="menuBtn" type="button">Очередь</button></section>
-    </main><aside class="right-panel" id="detailPanel" aria-label="Детали выбранного объекта" hidden></aside>
-  </div>
-  <dialog id="dlg"><form id="form" method="dialog"><header class="dialog-heading"><div><span class="settings-kicker">НОВАЯ РАБОТА</span><h2>Создать заявку</h2></div><button type="button" id="fCancel" class="settings-close" aria-label="Закрыть">×</button></header><label>Борт на стоянке<select id="fStand" required></select><small id="fFlightInfo" class="muted"></small></label><label>Квалификация<select id="fQual"><option value="auto">Определить по описанию</option><option>Планер</option><option>Двигатель</option><option>Авионика</option></select></label><label>Описание неисправности<textarea id="fDesc" rows="3" required></textarea></label><label>Дополнительная информация<input id="fExtra" type="text"></label><label class="check"><input type="checkbox" id="fEm"> Чрезвычайная ситуация</label><p class="err" id="fErr" hidden></p><div class="row"><button type="button" id="fCancelSecondary">Отмена</button><button type="submit" class="primary">Создать заявку</button></div></form></dialog>
-  <dialog id="settingsDlg" class="settings-dialog tg-settings-modal" aria-labelledby="settingsTitle">
-    <div class="tg-modal-content">
-      <header class="tg-modal-header">
-        <div class="tg-profile-summary">
-          <div class="tg-avatar-big" id="tgUserBigAvatar" style="background: linear-gradient(135deg, #2AABEE, #2275B3);">ОР</div>
-          <div class="tg-profile-meta">
-            <h2 id="tgProfileTitle">Орлов А. В.</h2>
-            <span class="tg-profile-status" id="tgProfileSubtitle">@orlov · в сети</span>
-          </div>
+      <header class="lp-head">
+        <div class="lp-title">
+          <div><span class="eyebrow">Операционный центр</span><h1>Очередь смены</h1></div>
+          <span class="connection-state" id="conn" aria-label="Связь с сервером" title="Связь с сервером"></span>
         </div>
-        <button type="button" class="settings-close" id="tgCloseSettings" aria-label="Закрыть">×</button>
+        <p id="airportName" class="lp-airport">Шереметьево · SVO</p>
+        <div class="lp-actions">
+          <button class="btn btn-primary dispatcher-only" id="newBtn" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"/></svg>Новая заявка</button>
+          <button class="btn btn-icon dispatcher-only" id="newAcBtn" type="button" aria-label="Добавить входящий рейс" title="Добавить рейс"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2l-1.3 1.3 6.7 3.9-3.3 3.3-2.6-.4-1 1 3.4 1.9 1.9 3.4 1-1-.4-2.6 3.3-3.3 3.9 6.7z"/></svg></button>
+        </div>
+        <label class="search" for="queueSearch"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="queueSearch" type="search" placeholder="Поиск по очереди" autocomplete="off"><kbd>/</kbd></label>
+        <nav class="tabs" id="tabs" aria-label="Очередь смены">
+          <button type="button" data-tab="active" class="on" aria-current="page">Заявки<span class="tab-count" id="cActive"></span></button>
+          <button type="button" data-tab="flights">Рейсы<span class="tab-count" id="cFlights"></span></button>
+          <button type="button" data-tab="techs">Команда<span class="tab-count" id="cReg"></span></button>
+          <button type="button" data-tab="log">Журнал</button>
+        </nav>
       </header>
-
-      <div class="tg-settings-body">
-        <div class="tg-section-header">МОЙ ПРОФИЛЬ · TELEGRAM STYLE</div>
-        
-        <label class="tg-input-group">
-          <span>ФИО (Отображаемое имя):</span>
-          <input type="text" id="settingName" placeholder="Фамилия Имя Отчество" />
-        </label>
-
-        <label class="tg-input-group">
-          <span>Позывной (@username):</span>
-          <div class="tg-input-with-btn">
-            <span class="tg-prefix">@</span>
-            <input type="text" id="settingUsername" placeholder="username" />
-          </div>
-        </label>
-
-        <label class="tg-input-group">
-          <span>О себе (Bio / Статус):</span>
-          <textarea id="settingBio" rows="2" placeholder="Например: Диспетчер смены перрона Шереметьево · Смена №2"></textarea>
-        </label>
-
-        <div class="tg-input-group">
-          <span>Цвет аватара:</span>
-          <div class="tg-color-picker" id="tgColorPicker">
-            <button type="button" class="color-dot active" data-color="#2AABEE" style="background:#2AABEE;"></button>
-            <button type="button" class="color-dot" data-color="#8E85EE" style="background:#8E85EE;"></button>
-            <button type="button" class="color-dot" data-color="#45B9A5" style="background:#45B9A5;"></button>
-            <button type="button" class="color-dot" data-color="#E57373" style="background:#E57373;"></button>
-            <button type="button" class="color-dot" data-color="#F39C12" style="background:#F39C12;"></button>
-          </div>
-        </div>
-
-        <button type="button" id="btnSaveTelegramProfile" class="tg-save-btn">Сохранить изменения профиля</button>
-
-        <div class="tg-section-header">ДАННЫЕ СОТРУДНИКА</div>
-        <div class="tg-info-row"><span>Email:</span><b id="tgUserEmail">dispatcher@oto.ru</b></div>
-        <div class="tg-info-row"><span>Должность:</span><b id="tgUserRole">Диспетчер смены</b></div>
-        <div class="tg-info-row"><span>Табельный номер:</span><b id="tgUserTechId">DISP-01</b></div>
-        <div class="tg-info-row"><span>Статус на смене:</span><b id="tgUserShiftStatus" style="color:#10B981;">На смене</b></div>
-
-        <div class="tg-section-header">ВТОРОЙ АККАУНТ ДЛЯ ПРОВЕРКИ ЧАТА</div>
-        <p class="session-in-settings-note">Откроется отдельное окно входа. Текущий чат останется в этом окне.</p>
-        <button type="button" id="newSession" class="tg-sub-btn session-in-settings" title="Создать отдельное окно для входа второго пользователя">Открыть окно второго аккаунта</button>
-
-        <div class="tg-section-header">УВЕДОМЛЕНИЯ И ЗВУКИ</div>
-        <label class="tg-checkbox-row">
-          <input type="checkbox" id="settingSoundAlert" checked />
-          <span>Звуковой сигнал при входящем сообщении в чате</span>
-        </label>
-
-        <div class="tg-section-header">СЕРВЕР И ЗАДЕРЖКА</div>
-        <div class="tg-info-row">
-          <span>Сервер VPS:</span>
-          <b>31.56.179.117</b>
-        </div>
-        <div class="tg-info-row">
-          <span>Задержка сети (Ping):</span>
-          <b id="tgPingLabel" style="color:#38BDF8;">—</b>
-        </div>
-        <button type="button" id="btnTestPing" class="tg-sub-btn">Замерить задержку до сервера</button>
+      <div class="panes">
+        <div class="pane on" id="pane-active"></div>
+        <div class="pane" id="pane-flights"></div>
+        <div class="pane" id="pane-techs"></div>
+        <div class="pane" id="pane-log"></div>
       </div>
+      <footer class="lp-foot">
+        <div class="avatar" id="userAvatarFooter">Д</div>
+        <div class="lp-who"><b id="userName">Диспетчер</b><span id="userRole">диспетчер смены</span></div>
+        <button class="btn btn-ghost btn-sm" id="logoutBtn" type="button" aria-label="Выйти из аккаунта"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>Выйти</button>
+      </footer>
+    </aside>
 
-      <footer class="tg-modal-footer">
-        <button type="button" class="tg-logout-btn" id="tgLogoutBtn">Выйти из аккаунта</button>
-        <button type="button" class="tg-close-btn" id="tgDoneBtn">Готово</button>
+    <!-- Map workspace -->
+    <main class="workspace" aria-label="Рабочая карта">
+      <section class="map-stage" aria-label="Карта аэропорта">
+        <svg id="map" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Интерактивная карта перрона Шереметьево"></svg>
+        <canvas id="map3d" hidden aria-label="3D-карта перрона"></canvas>
+        <div class="map-vignette" aria-hidden="true"></div>
+
+        <!-- Top command bar -->
+        <header class="cmdbar glass">
+          <div class="cmd-title">
+            <span class="eyebrow"><i class="live-dot"></i>Перон · SVO / UUEE</span>
+            <h2 id="workspaceTitle">Обзор смены</h2>
+          </div>
+          <div class="cmd-sep"></div>
+          <section class="stats" id="stats" aria-label="Сводка смены"></section>
+          <div class="cmd-sep"></div>
+          <div class="kpis" aria-live="polite">
+            <div class="kpi"><strong id="demoAvg">—</strong><span>ср. прибытие, мин</span></div>
+            <div class="kpi kpi-good"><strong id="demoSla">—</strong><span>в нормативе 15</span></div>
+            <div class="kpi kpi-accent"><strong id="demoSaved">—</strong><span>выигрыш, мин</span></div>
+          </div>
+          <div class="cmd-spacer"></div>
+          <div class="cmd-controls">
+            <div class="segmented sim-group">
+              <label class="speed"><span class="sr-only">Скорость</span><select id="speed" class="dispatcher-only" aria-label="Скорость модельного времени"><option value="1">×1</option><option value="5">×5</option><option value="10" selected>×10</option><option value="30">×30</option><option value="60">×60</option></select></label>
+              <button id="simToggle" class="sim-toggle" type="button" aria-pressed="true" aria-label="Приостановить симуляцию"><svg class="sim-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5v10M13 5v10"/></svg><svg class="sim-play" viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 9 5.5-9 5.5z"/></svg><span id="simToggleText">Пауза</span></button>
+            </div>
+            <button class="icon-btn chat-toggle" id="chatToggle" type="button" aria-label="Открыть чат смены" aria-expanded="false" title="Связь смены"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H5l1.7-3.5A7.5 7.5 0 1 1 20 11.5Z"/></svg><span class="chat-unread" id="chatUnread" hidden>0</span></button>
+            <button class="avatar-btn" id="headerProfileBtn" type="button" title="Профиль и настройки"><span class="avatar" id="headerProfileName">Д</span></button>
+            <button class="sr-only" id="appSettings" type="button" tabindex="-1" aria-hidden="true">Настройки</button>
+          </div>
+        </header>
+
+        <!-- Demo bar -->
+        <section class="demobar" aria-label="Демо и телеметрия">
+          <details class="scenarios glass">
+            <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 4 14 8-14 8z"/></svg>Сценарии<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+            <nav class="scenario-menu glass" aria-label="Демо-сценарии">
+              <span class="eyebrow">Контрольные сценарии</span>
+              <button class="demo-preset" type="button" data-demo="1"><i>01</i><span><b>Штатный вызов</b><small>Ближайший инженер по графу РД</small></span></button>
+              <button class="demo-preset" type="button" data-demo="2"><i>02</i><span><b>Перекрытие РД</b><small>Объезд закрытой рулёжки</small></span></button>
+              <button class="demo-preset" type="button" data-demo="3"><i>03</i><span><b>Пиковая нагрузка</b><small>Три борта одновременно</small></span></button>
+              <button class="demo-preset" type="button" data-demo="4"><i>04</i><span><b>Дефицит квалификации</b><small>Редкий допуск, очередь</small></span></button>
+              <button class="demo-preset" type="button" data-demo="5"><i>05</i><span><b>Сравнение с диспетчером</b><small>Человек против алгоритма</small></span></button>
+            </nav>
+          </details>
+          <button type="button" id="demoCompare" class="compare glass" aria-pressed="false"><span class="compare-legend"><i class="h"></i><i class="s"></i></span>Человек vs система<i class="switch" aria-hidden="true"></i></button>
+          <aside class="compare-note glass" id="demoComparisonNote"><span>Разница прибытия</span><strong id="demoSavings">Выберите заявку</strong></aside>
+        </section>
+
+        <!-- HUD -->
+        <div class="map-hud glass">
+          <span class="map-live offline" id="mapLive" aria-live="polite"><i></i><b id="mapLiveText">СВЯЗЬ…</b></span>
+          <span class="hud-sep"></span>
+          <span class="map-hud-airport" id="mapHudAirport">SVO · UUEE</span>
+          <span class="hud-sep"></span>
+          <span class="map-hud-fleet" id="vehicleCount">Транспорт…</span>
+        </div>
+        <div class="legend glass" id="legend" aria-label="Обозначения карты">
+          <span><i class="q-glider"></i>Планер</span><span><i class="q-engine"></i>Двигатель</span><span><i class="q-avionics"></i>Авионика</span>
+          <span class="sep"></span><span><i class="l-route"></i>Маршрут</span><span><i class="l-iso"></i>Зона 15 мин</span><span><i class="l-em"></i>ЧС</span>
+        </div>
+        <div class="map-tools glass" aria-label="Управление картой">
+          <button id="view3d" type="button" aria-label="Переключить 2D / 3D">3D</button>
+          <span class="tool-sep"></span>
+          <button id="zin" type="button" aria-label="Приблизить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button id="zout" type="button" aria-label="Отдалить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+          <span class="tool-sep"></span>
+          <button id="zfit" type="button" aria-label="Показать весь аэропорт"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+        </div>
+        <div class="map-scale glass">
+          <span class="map-north" title="Север"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 5 16l5-3 5 3z"/></svg>N</span>
+          <span class="map-scale-rule" id="mapScaleLine"></span><b id="mapScaleLabel">—</b>
+        </div>
+        <button class="mobile-menu btn btn-ghost" id="menuBtn" type="button">Очередь</button>
+      </section>
+    </main>
+
+    <aside class="right-panel glass" id="detailPanel" aria-label="Детали выбранного объекта" hidden></aside>
+  </div>
+
+  <!-- New request -->
+  <dialog id="dlg" class="modal">
+    <form id="form" method="dialog">
+      <header class="modal-head"><div><span class="eyebrow">Новая работа</span><h2>Создать заявку</h2></div><button type="button" id="fCancel" class="icon-btn" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="modal-body">
+        <label class="field">Борт на стоянке<select id="fStand" required></select><small id="fFlightInfo" class="muted"></small></label>
+        <label class="field">Квалификация<select id="fQual"><option value="auto">Определить по описанию</option><option>Планер</option><option>Двигатель</option><option>Авионика</option></select></label>
+        <label class="field">Описание неисправности<textarea id="fDesc" rows="3" required placeholder="Например: утечка гидравлики на левой стойке"></textarea></label>
+        <label class="field">Дополнительно<input id="fExtra" type="text" placeholder="Необязательно"></label>
+        <label class="check"><input type="checkbox" id="fEm"><span>Чрезвычайная ситуация</span></label>
+        <p class="err" id="fErr" hidden></p>
+      </div>
+      <footer class="modal-foot"><button type="button" class="btn btn-ghost" id="fCancelSecondary">Отмена</button><button type="submit" class="btn btn-primary">Создать заявку</button></footer>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settingsDlg" class="modal settings-modal" aria-labelledby="tgProfileTitle">
+    <div class="tg-modal-content">
+      <header class="modal-head profile-head">
+        <div class="tg-profile-summary">
+          <div class="tg-avatar-big" id="tgUserBigAvatar">ОР</div>
+          <div><h2 id="tgProfileTitle">Орлов А. В.</h2><span class="muted" id="tgProfileSubtitle">@orlov · в сети</span></div>
+        </div>
+        <button type="button" class="icon-btn" id="tgCloseSettings" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </header>
+      <div class="modal-body">
+        <div class="section-label">Профиль</div>
+        <label class="field">Отображаемое имя<input type="text" id="settingName" placeholder="Фамилия Имя Отчество"></label>
+        <label class="field">Позывной<span class="input-prefix"><i>@</i><input type="text" id="settingUsername" placeholder="username"></span></label>
+        <label class="field">О себе<textarea id="settingBio" rows="2" placeholder="Диспетчер смены перрона · Смена №2"></textarea></label>
+        <div class="field">Цвет аватара
+          <div class="tg-color-picker" id="tgColorPicker">
+            <button type="button" class="color-dot active" data-color="#6366F1" style="background:#6366F1" aria-label="Индиго"></button>
+            <button type="button" class="color-dot" data-color="#10B981" style="background:#10B981" aria-label="Изумруд"></button>
+            <button type="button" class="color-dot" data-color="#F59E0B" style="background:#F59E0B" aria-label="Янтарь"></button>
+            <button type="button" class="color-dot" data-color="#06B6D4" style="background:#06B6D4" aria-label="Бирюза"></button>
+            <button type="button" class="color-dot" data-color="#EC4899" style="background:#EC4899" aria-label="Розовый"></button>
+          </div>
+        </div>
+        <button type="button" id="btnSaveTelegramProfile" class="btn btn-primary btn-block">Сохранить профиль</button>
+
+        <div class="section-label">Сотрудник</div>
+        <div class="info-list">
+          <div><span>Email</span><b id="tgUserEmail">—</b></div>
+          <div><span>Должность</span><b id="tgUserRole">Диспетчер смены</b></div>
+          <div><span>Табельный №</span><b id="tgUserTechId">—</b></div>
+          <div><span>Статус</span><b id="tgUserShiftStatus">На смене</b></div>
+        </div>
+
+        <div class="section-label">Второй аккаунт</div>
+        <p class="muted small">Откроется отдельное окно входа — удобно проверить чат и звонки между ролями.</p>
+        <button type="button" id="newSession" class="btn btn-ghost btn-block">Открыть окно второго аккаунта</button>
+
+        <div class="section-label">Уведомления</div>
+        <label class="check"><input type="checkbox" id="settingSoundAlert" checked><span>Звук при новом сообщении</span></label>
+
+        <div class="section-label">Сервер</div>
+        <div class="info-list">
+          <div><span>Задержка сети</span><b id="tgPingLabel" class="mono">—</b></div>
+        </div>
+        <button type="button" id="btnTestPing" class="btn btn-ghost btn-block">Замерить задержку</button>
+      </div>
+      <footer class="modal-foot">
+        <button type="button" class="btn btn-danger-ghost" id="tgLogoutBtn">Выйти из аккаунта</button>
+        <button type="button" class="btn btn-primary" id="tgDoneBtn">Готово</button>
       </footer>
     </div>
   </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <aside class="chat-panel" id="chatPanel" aria-label="Чат смены" hidden><header class="chat-head"><div><span class="panel-kicker">КОМАНДНЫЙ КАНАЛ</span><h2>Связь смены</h2></div><button id="chatClose" class="chat-close" type="button" aria-label="Закрыть чат">×</button></header><div class="chat-rooms" id="chatRooms" role="tablist" aria-label="Каналы связи"></div><div class="chat-conversation-head"><div><b id="chatRoomName">Общий канал смены</b><span id="chatRoomState">Сообщения команды</span></div><button id="chatCall" type="button" class="chat-call" aria-label="Позвонить собеседнику" title="Голосовой вызов"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></button></div><div class="chat-messages" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div><div class="sticker-picker" id="stickerPicker" hidden></div><form id="chatForm" class="chat-form"><input type="file" id="chatFileInput" style="display:none;" /><button id="chatFileBtn" class="chat-sticker-toggle" type="button" title="Прикрепить файл или фото"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 6.5-6.5a4 4 0 0 1 5.7 5.7L10 21a6 6 0 0 1-8.5-8.5L11 3"/></svg></button><button id="chatVoiceBtn" class="chat-sticker-toggle" type="button" title="Голосовое сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4m-4 0h8"/></svg></button><button id="chatStickerToggle" class="chat-sticker-toggle" type="button" aria-label="Открыть стикеры">＋</button><label class="sr-only" for="chatInput">Сообщение команде</label><textarea id="chatInput" rows="1" maxlength="2000" placeholder="Сообщение…"></textarea><button class="chat-send" type="submit" aria-label="Отправить сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 16 8-16 8 3-8zM7 12h13"/></svg></button></form><div class="chat-footer-note">Оперативный канал · сообщения сохраняются локально</div></aside><div class="chat-notice" id="chatNotice" role="status" aria-live="polite" hidden></div>
-  <dialog id="callDialog" class="call-dialog" aria-labelledby="callTitle"><div class="call-orbit" aria-hidden="true"><span></span><i></i></div><span class="panel-kicker" id="callStatus">ЗАЩИЩЁННЫЙ КАНАЛ</span><h2 id="callTitle">Голосовой вызов</h2><p id="callPeer">Собеседник</p><div id="callTimer" class="call-timer" hidden>00:00</div><div class="call-incoming-actions" id="callIncomingActions"><button type="button" id="callAnswer" class="call-answer">Ответить</button><button type="button" id="callDecline" class="danger">Отклонить</button></div><div class="call-active-actions" id="callActiveActions" hidden><button type="button" id="callMute" class="call-control" aria-pressed="false">Отключить микрофон</button><button type="button" id="callHangup" class="danger">Завершить звонок</button></div><audio id="remoteAudio" autoplay playsinline></audio></dialog>
-  <script src="/static/window-controls.js?v=2.6"></script><script src="/static/map3d.js?v=2.6"></script><script src="/static/desktop.js?v=2.6"></script><script src="/static/bridge.js?v=2.6"></script><script src="/static/chat.js?v=3.10"></script><script src="/static/app.js?v=2.6"></script>
-</body></html>
+
+  <!-- Chat -->
+  <aside class="chat-panel glass" id="chatPanel" aria-label="Чат смены" hidden>
+    <header class="chat-head">
+      <div><span class="eyebrow">Командный канал</span><h2>Связь смены</h2></div>
+      <button id="chatClose" class="icon-btn" type="button" aria-label="Закрыть чат"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="chat-rooms" id="chatRooms" role="tablist" aria-label="Каналы связи"></div>
+    <div class="chat-conversation-head">
+      <div class="chat-peer"><b id="chatRoomName">Общий канал смены</b><span id="chatRoomState">Сообщения команды</span></div>
+      <button id="chatCall" type="button" class="icon-btn chat-call" aria-label="Позвонить собеседнику" title="Голосовой вызов"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></button>
+    </div>
+    <div class="chat-messages" id="chatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+    <div class="sticker-picker" id="stickerPicker" hidden></div>
+    <form id="chatForm" class="chat-form">
+      <input type="file" id="chatFileInput" hidden>
+      <button id="chatFileBtn" class="chat-tool" type="button" title="Прикрепить файл"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 12 6.5-6.5a4 4 0 0 1 5.7 5.7L10 21a6 6 0 0 1-8.5-8.5L11 3"/></svg></button>
+      <button id="chatStickerToggle" class="chat-tool" type="button" aria-label="Стикеры" title="Стикеры"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg></button>
+      <label class="sr-only" for="chatInput">Сообщение команде</label>
+      <textarea id="chatInput" rows="1" maxlength="2000" placeholder="Сообщение…"></textarea>
+      <button id="chatVoiceBtn" class="chat-tool chat-voice" type="button" title="Голосовое сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></button>
+      <button class="chat-send" type="submit" aria-label="Отправить сообщение"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </form>
+  </aside>
+  <div class="chat-notice" id="chatNotice" role="status" aria-live="polite" hidden></div>
+
+  <!-- Call -->
+  <dialog id="callDialog" class="call-dialog" aria-labelledby="callTitle">
+    <div class="call-avatar" aria-hidden="true"><span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span><svg viewBox="0 0 24 24"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg></div>
+    <span class="eyebrow" id="callStatus">Защищённый канал</span>
+    <h2 id="callTitle">Голосовой вызов</h2>
+    <p id="callPeer">Собеседник</p>
+    <div class="call-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div id="callTimer" class="call-timer" hidden>00:00</div>
+    <div class="call-actions" id="callIncomingActions"><button type="button" id="callAnswer" class="call-btn accept" aria-label="Ответить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/></svg><span>Ответить</span></button><button type="button" id="callDecline" class="call-btn decline" aria-label="Отклонить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg><span>Отклонить</span></button></div>
+    <div class="call-actions" id="callActiveActions" hidden><button type="button" id="callMute" class="call-btn mute" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg><span>Микрофон</span></button><button type="button" id="callHangup" class="call-btn decline"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c5-5 13-5 18 0l-2 3-4-1v-3a10 10 0 0 0-6 0v3l-4 1z"/></svg><span>Завершить</span></button></div>
+    <audio id="remoteAudio" autoplay playsinline></audio>
+  </dialog>
+
+  <script src="/static/window-controls.js?v=4.0"></script><script src="/static/map3d.js?v=4.0"></script><script src="/static/desktop.js?v=4.0"></script><script src="/static/bridge.js?v=4.0"></script><script src="/static/chat.js?v=4.0"></script><script src="/static/app.js?v=4.0"></script>
+</body>
+</html>
