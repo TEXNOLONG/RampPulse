@@ -590,6 +590,23 @@ fn realtime_protocol_version() -> u16 {
     ramppulse_core::REALTIME_PROTOCOL_VERSION
 }
 
+/// Integer scale of the focused monitor on Hyprland (`hyprctl monitors -j`).
+#[cfg(target_os = "linux")]
+fn detect_monitor_scale() -> Option<String> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    let monitors: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let list = monitors.as_array()?;
+    let monitor = list
+        .iter()
+        .find(|m| m.get("focused").and_then(Value::as_bool) == Some(true))
+        .or_else(|| list.first())?;
+    let scale = monitor.get("scale")?.as_f64()?;
+    Some(((scale.round() as i64).max(1)).to_string())
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -597,6 +614,17 @@ fn main() {
         // WebKitGTK/Wayland combinations fail during page load with GDK
         // protocol errors. Keep an app-specific override for troubleshooting.
         let backend = std::env::var("AIRPORT_CRM_GDK_BACKEND").unwrap_or_else(|_| "x11".into());
+        if backend == "x11" {
+            // Desktop environments such as Omarchy export a global GDK_SCALE (e.g. 2)
+            // that XWayland clients inherit even on a 1x monitor, which renders the
+            // whole UI at double size. Derive the scale from the real monitor instead.
+            let scale = std::env::var("RAMPPULSE_SCALE")
+                .ok()
+                .or_else(detect_monitor_scale)
+                .unwrap_or_else(|| "1".into());
+            std::env::set_var("GDK_SCALE", scale);
+            std::env::remove_var("GDK_DPI_SCALE");
+        }
         std::env::set_var("GDK_BACKEND", backend);
     }
     #[cfg(target_os = "linux")]

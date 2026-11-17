@@ -177,6 +177,18 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows the primary RampPulse window to open an isolated secondary operator session.",
+          "type": "string",
+          "const": "allow-open-secondary-session",
+          "markdownDescription": "Allows the primary RampPulse window to open an isolated secondary operator session."
+        },
+        {
+          "description": "Enables the RampPulse desktop and chat backend commands used by the frontend bridge.",
+          "type": "string",
+          "const": "allow-rampulse-backend",
+          "markdownDescription": "Enables the RampPulse desktop and chat backend commands used by the frontend bridge."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
