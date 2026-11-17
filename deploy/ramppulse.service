@@ -14,6 +14,8 @@ Environment=AIRPORT_FILE=/opt/ramppulse/app/data/airport_sheremetyevo.json
 Environment=TECHS_FILE=/opt/ramppulse/app/data/technicians.json
 Environment=DEMO_MODE=1
 Environment=COOKIE_SECURE=1
+EnvironmentFile=-/etc/ramppulse-turn.env
+Environment=CHAT_UPLOAD_DIR=/var/lib/ramppulse/chat-attachments
 ExecStart=/opt/ramppulse/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
 Restart=on-failure
 RestartSec=3

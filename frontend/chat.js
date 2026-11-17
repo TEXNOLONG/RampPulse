@@ -9,7 +9,7 @@
   ];
   let identity = null, rooms = [], contacts = [], selectedRoom = null, messages = [], unreadTotal = 0, serverMode = false;
   let unlistenChat = null, unlistenCalls = null, audioContext = null, ringInterval = 0, callClock = 0, call = null;
-  let iceServersPromise = null;
+  let iceServersPromise = null, iceServersLoadedAt = 0;
   let roomLoadToken = 0;
   const knownMessages = new Set();
   const pendingMessages = new Set();
@@ -20,6 +20,29 @@
   }
 
   function invoke(command, args) { return window.otoBridge.chat[command](...args); }
+  async function requestMicrophoneStream() {
+    const media = navigator.mediaDevices;
+    if (!media?.getUserMedia) throw new Error('Для голосовой связи нужен защищённый источник и доступ к микрофону.');
+    // WebKitGTK can crash after repeatedly asking GStreamer for an absent input.
+    // Check first and issue only one basic capture request; optional constraints
+    // are deliberately omitted for compatibility across WebKit, Chromium and Android.
+    if (media.enumerateDevices) {
+      const devices = await media.enumerateDevices().catch(() => []);
+      if (devices.length && !devices.some(device => device.kind === 'audioinput')) {
+        throw new Error('Микрофон не найден. Подключите устройство ввода и проверьте настройки звука.');
+      }
+    }
+    try { return await media.getUserMedia({audio:true, video:false}); }
+    catch (error) {
+      if (['NotFoundError','DevicesNotFoundError'].includes(error?.name)) {
+        throw new Error('Микрофон не найден. Подключите устройство ввода и проверьте настройки звука.');
+      }
+      if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+        throw new Error('Разрешите RampPulse доступ к микрофону в настройках системы.');
+      }
+      throw error;
+    }
+  }
   function timeLabel(value) {
     const stamp = String(value || '').replace(' ', 'T');
     const date = new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(stamp) ? stamp : `${stamp}Z`);
@@ -88,10 +111,16 @@
       const sticker = message.sticker ? stickerHtml(message.sticker, true) : '';
       let mediaHtml = '';
       if (message.media_url) {
-        if (String(message.media_type || '').startsWith('image/')) {
+        const mediaType = String(message.media_type || '').toLowerCase();
+        const mediaName = String(message.media_name || '');
+        const legacyVoice = mediaType === 'audio_voice';
+        if (mediaType.startsWith('image/')) {
           mediaHtml = `<div class="chat-media-wrap"><a href="${esc(message.media_url)}" target="_blank"><img src="${esc(message.media_url)}" class="chat-media-img" alt="${esc(message.media_name||'Фото')}"/></a></div>`;
-        } else if (String(message.media_type || '').startsWith('audio/')) {
-          mediaHtml = `<div class="chat-voice-wrap"><audio controls src="${esc(message.media_url)}" class="chat-voice-audio"></audio><span class="chat-voice-label">${esc(message.media_name || 'Голосовое сообщение')}</span></div>`;
+        } else if (mediaType.startsWith('audio/') || legacyVoice) {
+          const audioType = legacyVoice
+            ? (/\.ogg$/i.test(mediaName) ? 'audio/ogg' : /\.m4a$/i.test(mediaName) ? 'audio/mp4' : /\.wav$/i.test(mediaName) ? 'audio/wav' : 'audio/webm')
+            : mediaType;
+          mediaHtml = `<div class="chat-voice-wrap"><audio controls preload="metadata" class="chat-voice-audio"><source src="${esc(message.media_url)}" type="${esc(audioType)}"></audio><span class="chat-voice-label">${esc(message.media_name || 'Голосовое сообщение')}</span></div>`;
         } else {
           mediaHtml = `<div class="chat-file-wrap"><a href="${esc(message.media_url)}" download="${esc(message.media_name||'файл')}" class="chat-file-link" target="_blank">${esc(message.media_name || 'Скачать файл')}</a></div>`;
         }
@@ -336,8 +365,10 @@
   }
 
   function ensureAudioContext() {
-    if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioContext.state === 'suspended') void audioContext.resume();
+    const AudioContextImpl = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextImpl) return;
+    if (!audioContext) audioContext = new AudioContextImpl();
+    if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
   }
   function ringStart() {
     ensureAudioContext();
@@ -357,7 +388,10 @@
   }
   function ringStop() { clearInterval(ringInterval); ringInterval = 0; }
   function getIceServers() {
-    if (!iceServersPromise) {
+    // TURN credentials are short lived. Refresh the server's signed ICE config
+    // while the client stays open for a long shift.
+    if (!iceServersPromise || Date.now() - iceServersLoadedAt > 4 * 60 * 1000) {
+      iceServersLoadedAt = Date.now();
       iceServersPromise = window.otoBridge.get('/api/calls/config')
         .then(config => Array.isArray(config?.ice_servers) && config.ice_servers.length
           ? config.ice_servers
@@ -398,34 +432,65 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('Доступ к микрофону требует защищённого источника. Откройте RampPulse для компьютера или подключите сервер по HTTPS.');
     }
-    call.stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    call.stream = await requestMicrophoneStream();
     call.pc = new RTCPeerConnection({iceServers:await getIceServers(),iceCandidatePoolSize:2});
     call.stream.getTracks().forEach(track => call.pc.addTrack(track, call.stream));
-    call.pc.onicecandidate = event => { if (event.candidate) void callSignal('ice', {candidate:event.candidate.toJSON()}); };
-    call.pc.ontrack = event => { const audio = $('#remoteAudio'); audio.srcObject = event.streams[0]; void audio.play().catch(() => {}); };
+    call.pc.onicecandidate = event => {
+      if (event.candidate) callSignal('ice', {candidate:event.candidate.toJSON()}).catch(() => {
+        if (call) $('#callStatus').textContent = 'ПРОБЛЕМА С СИГНАЛОМ СЕРВЕРА';
+      });
+    };
+    call.pc.ontrack = event => {
+      const audio = $('#remoteAudio');
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.srcObject = event.streams[0];
+      void audio.play().catch(() => {
+        if (call) $('#callStatus').textContent = 'НАЖМИТЕ НА ЭКРАН, ЧТОБЫ ВКЛЮЧИТЬ ЗВУК';
+      });
+    };
     call.pc.onconnectionstatechange = () => {
       if (!call) return;
-      if (call.pc.connectionState === 'connected') { ringStop(); clearTimeout(call.timeout); call.timeout = 0; showCall('active'); startCallClock(); }
-      if (['failed','disconnected'].includes(call.pc.connectionState)) $('#callStatus').textContent = 'ВОССТАНАВЛИВАЕМ СВЯЗЬ';
+      const state = call.pc.connectionState;
+      if (state === 'connected') {
+        ringStop(); clearTimeout(call.timeout); call.timeout = 0;
+        clearTimeout(call.recoveryTimeout); call.recoveryTimeout = 0;
+        showCall('active'); startCallClock();
+      } else if (state === 'disconnected' || state === 'failed') {
+        $('#callStatus').textContent = 'ВОССТАНАВЛИВАЕМ СВЯЗЬ';
+        clearTimeout(call.recoveryTimeout);
+        call.recoveryTimeout = window.setTimeout(() => {
+          if (call && ['disconnected','failed'].includes(call.pc?.connectionState)) {
+            toastIncoming('Голосовая связь', 'Не удалось восстановить соединение');
+            void endCall();
+          }
+        }, 12000);
+      }
     };
   }
   async function startCall() {
     if (!selectedRoom || selectedRoom.kind !== 'direct' || !selectedRoom.peer_id || call) return;
-    ensureAudioContext();
     call = {id:crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),peerId:Number(selectedRoom.peer_id),peerName:selectedRoom.peer_name,incoming:false,ice:[]};
     showCall('outgoing');
     try {
-      await callSignal('ring'); ringStart();
+      ensureAudioContext();
       await preparePeer();
+      await callSignal('ring'); ringStart();
       const offer = await call.pc.createOffer();
       await call.pc.setLocalDescription(offer);
       await callSignal('offer', {description:call.pc.localDescription.toJSON()});
       call.timeout = window.setTimeout(() => { if (call) { void endCall(); toastIncoming('Голосовая связь','Нет ответа'); } }, 30000);
-    } catch (error) { cleanupCall(); toastIncoming('Звонок не начался', error.name === 'NotAllowedError' ? 'Разрешите доступ к микрофону в настройках системы.' : window.otoBridge.errorMessage(error)); }
+    } catch (error) {
+      const message = window.otoBridge.errorMessage(error);
+      cleanupCall();
+      toastIncoming('Звонок не начался', message);
+    }
   }
   async function acceptCall() {
     if (!call?.incoming) return;
     ringStop();
+    clearTimeout(call.timeout); call.timeout = 0;
+    call.incoming = false;
     showCall('outgoing');
     try {
       await preparePeer();
@@ -435,6 +500,12 @@
       const answer = await call.pc.createAnswer();
       await call.pc.setLocalDescription(answer);
       await callSignal('answer', {description:call.pc.localDescription.toJSON()});
+      call.timeout = window.setTimeout(() => {
+        if (call && call.pc?.connectionState !== 'connected') {
+          toastIncoming('Голосовая связь', 'Не удалось установить соединение. Проверьте интернет или TURN-сервер.');
+          void endCall();
+        }
+      }, 45000);
       showCall('outgoing');
     } catch (error) { toastIncoming('Не удалось ответить', window.otoBridge.errorMessage(error)); cleanupCall(); }
   }
@@ -451,6 +522,13 @@
     if (!call || call.id !== id) return;
     if (kind === 'offer') { call.offer = data.description; if (call.waitOffer) call.waitOffer(); return; }
     if (kind === 'answer' && call.pc) {
+      clearTimeout(call.timeout);
+      call.timeout = window.setTimeout(() => {
+        if (call && call.pc?.connectionState !== 'connected') {
+          toastIncoming('Голосовая связь', 'Не удалось установить соединение. Проверьте интернет или TURN-сервер.');
+          void endCall();
+        }
+      }, 45000);
       await call.pc.setRemoteDescription(new RTCSessionDescription(data.description));
       for (const candidate of call.ice.splice(0)) await call.pc.addIceCandidate(new RTCIceCandidate(candidate));
       return;
@@ -467,6 +545,7 @@
   function cleanupCall() {
     ringStop(); clearInterval(callClock); callClock = 0;
     if (call?.timeout) clearTimeout(call.timeout);
+    if (call?.recoveryTimeout) clearTimeout(call.recoveryTimeout);
     if (call?.pc) { call.pc.onicecandidate = null; call.pc.ontrack = null; call.pc.close(); }
     call?.stream?.getTracks().forEach(track => track.stop());
     $('#remoteAudio').srcObject = null;
@@ -476,12 +555,13 @@
   async function endCall(kind = 'hangup') {
     if (!call) return;
     const peerId = Number(call.peerId), callId = call.id;
-    try {
+    const relay = (async () => { try {
       const signal = {kind,call_id:callId};
       if (serverMode) await window.otoBridge.messaging.signalCall(peerId, signal);
       else await window.otoBridge.chat.signal(signal, peerId);
-    } catch (_) {}
+    } catch (_) {} })();
     cleanupCall();
+    await relay;
   }
 
   async function init() {
@@ -563,48 +643,89 @@
     let mediaRecorder = null;
     let voiceChunks = [];
     let voiceStart = 0;
+    let voiceStartPending = false;
+    let voiceLimitTimer = 0;
+    let recordingStream = null;
     if (voiceBtn) {
       voiceBtn.addEventListener('click', async () => {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          alert('Доступ к микрофону недоступен. Откройте приложение RampPulse или используйте защищённое HTTPS-соединение.');
+          toastIncoming('Микрофон недоступен', 'Для записи откройте RampPulse или подключитесь к серверу по HTTPS.');
           return;
         }
+        if (voiceStartPending) return;
         if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+          if (!window.MediaRecorder) {
+            toastIncoming('Запись не поддерживается', 'Обновите Android System WebView или используйте другое устройство.');
+            return;
+          }
+          voiceStartPending = true;
+          voiceBtn.disabled = true;
           try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recordingStream = await requestMicrophoneStream();
             voiceChunks = [];
             voiceStart = Date.now();
-            mediaRecorder = new MediaRecorder(stream);
+            const mimeCandidates = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'];
+            const mimeType = mimeCandidates.find(type => window.MediaRecorder.isTypeSupported?.(type)) || '';
+            mediaRecorder = mimeType
+              ? new window.MediaRecorder(recordingStream, { mimeType })
+              : new window.MediaRecorder(recordingStream);
+            const activeRecorder = mediaRecorder;
             mediaRecorder.ondataavailable = e => { if (e.data.size > 0) voiceChunks.push(e.data); };
             mediaRecorder.onstop = async () => {
-              stream.getTracks().forEach(t => t.stop());
-              const blob = new Blob(voiceChunks, { type: 'audio/webm' });
+              clearTimeout(voiceLimitTimer);
+              voiceLimitTimer = 0;
+              voiceBtn.disabled = false;
+              voiceBtn.style.color = '';
+              voiceBtn.title = 'Голосовое сообщение';
+              voiceBtn.setAttribute('aria-pressed', 'false');
+              recordingStream?.getTracks().forEach(t => t.stop());
+              recordingStream = null;
+              const actualMime = activeRecorder.mimeType || voiceChunks.find(chunk => chunk.type)?.type || mimeType || 'audio/webm';
+              const mediaType = actualMime.split(';')[0].toLowerCase();
+              const extension = mediaType === 'audio/mp4' ? 'm4a' : mediaType === 'audio/ogg' ? 'ogg' : 'webm';
+              const blob = new Blob(voiceChunks, { type: actualMime });
               const duration = Math.max(1, Math.round((Date.now() - voiceStart) / 1000));
+              if (!blob.size) {
+                toastIncoming('Пустая запись', 'Микрофон не передал звук. Проверьте разрешение и попробуйте ещё раз.');
+                return;
+              }
               try {
-                if (serverMode) await send('', null, { file: blob, kind: 'voice', name: `Голосовое сообщение (${duration}с)`, duration });
+                const voiceName = `Голосовое сообщение (${duration}с).${extension}`;
+                if (serverMode) await send('', null, { file: blob, kind: 'voice', name: voiceName, duration });
                 else {
                   const form = new FormData();
-                  form.append('file', blob, 'voice_note.webm');
+                  form.append('file', blob, voiceName);
                   const res = await fetch('/api/chat/upload', { method: 'POST', body: form });
                   if (!res.ok) throw new Error('Ошибка загрузки ГС');
                   const data = await res.json();
-                  await send('', null, { url: data.url, type: 'audio_voice', name: `Голосовое сообщение (${duration}с)`, duration });
+                  await send('', null, { url: data.url, type: data.media_type || mediaType, name: data.media_name || voiceName, duration });
                 }
               } catch (err) {
                 toastIncoming('ГС не отправлено', window.otoBridge.errorMessage(err));
               }
             };
-            mediaRecorder.start();
+            mediaRecorder.start(250);
+            voiceBtn.disabled = false;
             voiceBtn.style.color = '#ef4444';
             voiceBtn.title = 'Остановить запись';
-            toastIncoming('Голосовое сообщение', 'Идёт запись... Нажмите ещё раз для отправки');
+            voiceBtn.setAttribute('aria-pressed', 'true');
+            voiceLimitTimer = window.setTimeout(() => {
+              if (mediaRecorder?.state === 'recording') {
+                toastIncoming('Лимит записи', 'Голосовое сообщение ограничено 10 минутами и отправляется.');
+                mediaRecorder.stop();
+              }
+            }, 600000);
+            toastIncoming('Идёт запись', 'Нажмите кнопку микрофона ещё раз, чтобы отправить сообщение.');
           } catch (err) {
+            recordingStream?.getTracks().forEach(track => track.stop());
+            recordingStream = null;
+            voiceBtn.disabled = false;
             toastIncoming('Микрофон недоступен', window.otoBridge.errorMessage(err));
+          } finally {
+            voiceStartPending = false;
           }
         } else {
-          mediaRecorder.stop();
-          voiceBtn.style.color = '';
-          voiceBtn.title = 'Голосовое сообщение';
+          if (mediaRecorder.state === 'recording' || mediaRecorder.state === 'paused') mediaRecorder.stop();
         }
       });
     }

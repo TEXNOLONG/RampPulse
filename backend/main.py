@@ -1,6 +1,10 @@
 """FastAPI: REST + WebSocket. Запуск: python run.py"""
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
+import mimetypes
 import os
 import time
 import uuid
@@ -30,8 +34,9 @@ TECHS_FILE = Path(os.environ.get("TECHS_FILE", ROOT / "data" / "technicians.json
 DB_FILE = os.environ.get("DB_FILE", str(ROOT / "dispatch.db"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 DEMO_MODE = os.environ.get("DEMO_MODE", "1").lower() not in ("0", "false", "no", "off")
-UPLOAD_DIR = ROOT / "uploads"
+UPLOAD_DIR = Path(os.environ.get("CHAT_UPLOAD_DIR", ROOT / "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+mimetypes.add_type("audio/webm", ".webm", strict=True)
 
 airport = json.loads(AIRPORT_FILE.read_text(encoding="utf-8"))
 techs_cfg = json.loads(TECHS_FILE.read_text(encoding="utf-8"))
@@ -463,12 +468,11 @@ async def upload_chat_media(file: UploadFile = File(...), user: dict = Depends(c
     dest_path = UPLOAD_DIR / safe_name
     content = await file.read()
     dest_path.write_bytes(content)
-
-    media_type = "file"
-    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
-        media_type = "image"
-    elif ext in {".wav", ".mp3", ".ogg", ".webm", ".m4a", ".aac"}:
-        media_type = "audio_voice"
+    media_type = mimetypes.guess_type(file.filename or safe_name)[0] or "application/octet-stream"
+    if ext == ".webm":
+        media_type = "audio/webm"
+    elif ext == ".m4a":
+        media_type = "audio/mp4"
 
     return {
         "url": f"/uploads/{safe_name}",
@@ -498,6 +502,30 @@ async def relay_call(body: CallRelayBody, user: dict = Depends(current_user)):
     event = {"type": "call-signal", "payload": {**body.signal, "from_user_id": user["id"], "from_name": user["name"], "from_role": user["role"]}}
     await _send_to_user(peer["id"], event)
     return {"ok": True}
+
+
+@app.get("/api/calls/config")
+def call_config(user: dict = Depends(current_user)):
+    stun_urls = [
+        item.strip()
+        for item in os.environ.get("STUN_URLS", "stun:stun.l.google.com:19302").split(",")
+        if item.strip().startswith(("stun:", "stuns:"))
+    ]
+    ice_servers = [{"urls": stun_urls}] if stun_urls else []
+    turn_urls = [
+        item.strip()
+        for item in os.environ.get("TURN_URLS", "").split(",")
+        if item.strip().startswith(("turn:", "turns:"))
+    ]
+    turn_secret = os.environ.get("TURN_SHARED_SECRET", "")
+    if turn_urls and turn_secret:
+        expires = int(time.time()) + 6 * 60 * 60
+        username = f"{expires}:{user['id']}"
+        credential = base64.b64encode(
+            hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1).digest()
+        ).decode()
+        ice_servers.append({"urls": turn_urls, "username": username, "credential": credential})
+    return {"ice_servers": ice_servers}
 
 
 # ---------- действия диспетчера ----------

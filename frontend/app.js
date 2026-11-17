@@ -24,6 +24,7 @@ const AC_COL = {inbound: '#5D8568', parked: '#577491', departing: '#AC7444'};
 const NORM = 900;
 
 let AIR = null, S = null, ws = null, ME = null;
+let demoComparison = null, demoComparisonLoading = null, demoComparisonUnavailable = null;
 let role = 'dispatcher';
 let selReq = null, selTech = null, selAircraft = null, selVehicle = null;
 const openCands = new Set();
@@ -312,7 +313,9 @@ function buildMap() {
         gVehicles = el('g', {id: 'engineerVehicles'}, svg),
         gAC = el('g', {id: 'aircraft'}, svg),
         gT = el('g', {id: 'techs'}, svg),
-        gLabels = el('g', {id: 'mapLabels'}, svg);
+        gLabels = el('g', {id: 'mapLabels'}, svg),
+        gIsochrone = el('g', {id: 'isochrone', 'aria-hidden': 'true'}, svg),
+        gDemoRoutes = el('g', {id: 'demoRoutes', 'aria-hidden': 'true'}, svg);
 
   (AIR.areas || []).forEach(a => {
     const p = el('polygon', {points: a.points.map(q => q.join(',')).join(' '), class: 'area-' + a.kind}, gA);
@@ -555,7 +558,7 @@ function initMapEvents() {
       const pTitle = $('#tgProfileTitle');
       if (pTitle) pTitle.textContent = name;
       const pSub = $('#tgProfileSubtitle');
-      if (pSub) pSub.textContent = `@${uname} · 🟢 в сети`;
+      if (pSub) pSub.textContent = `@${uname} · в сети`;
 
       const inpName = $('#settingName');
       if (inpName) inpName.value = name;
@@ -629,7 +632,7 @@ function initMapEvents() {
           S.user.avatar_color = selectedAvatarColor;
         }
         $('#tgProfileTitle').textContent = newName;
-        $('#tgProfileSubtitle').textContent = `@${newUname} · 🟢 в сети`;
+        $('#tgProfileSubtitle').textContent = `@${newUname} · в сети`;
         const hdrName = $('#headerProfileName');
         if (hdrName) hdrName.textContent = `@${newUname}`;
         const ua = $('#userAvatar');
@@ -641,7 +644,7 @@ function initMapEvents() {
       } catch (err) {
         alert('Ошибка сохранения профиля: ' + err.message);
       } finally {
-        btnSaveTg.textContent = '💾 Сохранить изменения профиля';
+        btnSaveTg.textContent = 'Сохранить изменения профиля';
       }
     };
   }
@@ -816,6 +819,7 @@ function renderMap() {
   }
 
   for (const id in mapEl.edges) mapEl.edges[id].classList.toggle('blocked', S.blocked.includes(id));
+  renderTacticalOverlay();
   const hot = {};
   S.active.forEach(q => { if (!hot[q.stand] || q.priority === 'emergency') hot[q.stand] = q.priority; });
   const selStand = S.active.find(q => q.id === selReq)?.stand;
@@ -1027,6 +1031,7 @@ function renderTechs() {
 }
 function render() {
   if (!AIR || !S) return;
+  renderDemoTelemetry();
   const st = S.stats;
   const cards = [
     [st.aircraft_total, 'бортов'],
@@ -1084,6 +1089,183 @@ function render() {
     vehicle: selVehicle,
     stand: selReq ? (S.active.find(q => q.id === selReq)?.stand || null) : null,
   });
+}
+
+function renderDemoTelemetry() {
+  if (!S) return;
+  const history = (S.history || []).filter(request => request.created_at && request.arrived_at);
+  const elapsed = history.map(request => (Date.parse(request.arrived_at) - Date.parse(request.created_at)) / 60000).filter(value => Number.isFinite(value) && value >= 0);
+  const avg = elapsed.length ? elapsed.reduce((sum, value) => sum + value, 0) / elapsed.length : null;
+  const sla = elapsed.length ? elapsed.filter(value => value <= 15).length / elapsed.length * 100 : null;
+  const comparison = demoComparison && demoComparison.requestId === selReq ? demoComparison : null;
+  const saved = comparison ? Math.max(0, comparison.manualEta - comparison.systemEta) : null;
+  const fmt = value => value == null ? '—' : value.toFixed(1);
+  const avgNode = $('#demoAvg'), slaNode = $('#demoSla'), savedNode = $('#demoSaved');
+  if (avgNode) avgNode.textContent = fmt(avg);
+  if (slaNode) slaNode.textContent = sla == null ? '—' : `${Math.round(sla)}%`;
+  if (savedNode) savedNode.textContent = fmt(saved);
+  const note = $('#demoSavings');
+  if (note) {
+    const request = (S.active || []).find(item => item.id === selReq) || (S.active || [])[0];
+    const tech = request && (S.techs || []).find(item => item.id === request.tech_id);
+    const stand = request && (AIR.stands || []).find(item => item.id === request.stand);
+    const point = stand && (AIR.nodes || []).find(item => item.id === stand.node);
+    if (!request || !tech || !point || !Number.isFinite(Number(request.eta))) note.textContent = 'Выберите заявку с назначенным инженером';
+    else {
+      const directMinutes = Math.hypot(tech.x - point.x, tech.y - point.y) / Math.max(.1, Number(tech.speed || 1.3)) / 60;
+      const optimizedMinutes = Number(request.eta) / 60;
+      const saving = Math.max(0, directMinutes - optimizedMinutes);
+      note.textContent = `Расчётная разница · ${saving.toFixed(1)} мин`;
+    }
+  }
+}
+function renderTacticalOverlay() {
+  const iso = $('#isochrone'), demo = $('#demoRoutes');
+  if (!iso || !demo || !AIR || !S) return;
+  const request = (S.active || []).find(item => item.id === selReq);
+  const stand = request && (AIR.stands || []).find(item => item.id === request.stand);
+  const standPoint = stand && (AIR.nodes || []).find(item => item.id === stand.node);
+  const aircraft = request && (S.aircraft || []).find(item => item.stand === request.stand && item.status !== 'departing');
+  const point = aircraft ? {x:aircraft.x, y:aircraft.y} : standPoint;
+  const isoKey = point ? `${request.id}:${point.x}:${point.y}` : '';
+  if (iso.dataset.key !== isoKey) {
+    iso.dataset.key = isoKey;
+    iso.replaceChildren();
+    if (point) {
+      const radius = 1260; // 15 min at a conservative 1.4 m/s, in airport graph metres.
+      el('circle', {class:'isochrone-ring', cx:point.x, cy:point.y, r:radius}, iso);
+      el('circle', {class:'isochrone-inner', cx:point.x, cy:point.y, r:radius * .72}, iso);
+      el('text', {class:'isochrone-label', x:point.x + 18, y:point.y - radius + 32}, iso).textContent = 'ЗОНА 15:00';
+    }
+  }
+  const enabled = document.body.classList.contains('comparison-on');
+  const tech = request && (S.techs || []).find(item => item.id === request.tech_id);
+  if (enabled && request && tech && point && demoComparison?.requestId !== request.id && demoComparisonUnavailable !== request.id && demoComparisonLoading !== request.id) {
+    void updateDemoComparison(request, tech, point);
+  }
+  const comparison = enabled && request && demoComparison?.requestId === request.id ? demoComparison : null;
+  const routeKey = enabled && request && tech && point ? `${request.id}:${tech.id}:${tech.x}:${tech.y}:${point.x}:${point.y}:${comparison?.manualName || ''}:${comparison?.manualPoints?.length || 0}` : '';
+  if (demo.dataset.key === routeKey) return;
+  demo.dataset.key = routeKey;
+  demo.replaceChildren();
+  if (!routeKey) return;
+  const start = [tech.x, tech.y], target = [point.x, point.y];
+  const humanPoints = comparison?.manualPoints || [start, target];
+  const systemPoints = comparison?.systemPoints || ((tech.route || []).length > 1 ? tech.route : [start, target]);
+  el('polyline', {class:'demo-route-human', points:humanPoints.map(pair => pair.join(',')).join(' ')}, demo);
+  el('polyline', {class:'demo-route-system', points:systemPoints.map(pair => pair.join(',')).join(' ')}, demo);
+  const humanLabel = el('text', {class:'demo-route-label human', x:start[0] + 14, y:start[1] - 12}, demo);
+  humanLabel.textContent = comparison ? `ВЫБОР НА ГЛАЗ · ${comparison.manualName}` : 'МОДЕЛЬНЫЙ ВЫБОР · ИНЖЕНЕР';
+  const systemLabel = el('text', {class:'demo-route-label system', x:target[0] + 20, y:target[1] + 27}, demo);
+  systemLabel.textContent = 'АЛГОРИТМ · ПУТЬ ПО РД';
+}
+function pathLength(points) {
+  let length = 0;
+  for (let index = 1; index < points.length; index++) length += Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1]);
+  return length;
+}
+async function updateDemoComparison(request, systemTech, standPoint) {
+  if (demoComparisonLoading === request.id) return;
+  demoComparisonLoading = request.id;
+  const status = $('#demoSavings');
+  if (status) status.textContent = 'СРАВНИВАЕМ ДОСТУПНЫЕ МАРШРУТЫ…';
+  try {
+    const alternatives = (S.techs || []).filter(candidate => candidate.id !== systemTech.id && candidate.on_shift && candidate.route_available !== false && (request.qual === 'auto' || candidate.qual === request.qual));
+    if (!alternatives.length) {
+      demoComparisonUnavailable = request.id;
+      if (status) status.textContent = 'Для сравнения нужен второй специалист в смене';
+      return;
+    }
+    const target = (AIR.stands || []).find(item => item.id === request.stand);
+    const targetNode = target && (AIR.nodes || []).find(node => node.id === target.node);
+    if (!targetNode) return;
+    const toRoute = async candidate => {
+      const fromNode = nearestAirportNode(candidate.x, candidate.y);
+      if (!fromNode) return null;
+      const result = await window.otoBridge.post('/api/routes/preview', {from:fromNode.id, to:targetNode.id});
+      const points = [[candidate.x, candidate.y], ...(result.points || []).map(node => [node.x, node.y])];
+      const eta = pathLength(points) / Math.max(.1, Number(candidate.speed || 1.3)) / 60;
+      return {candidate, points, eta};
+    };
+    const scored = (await Promise.all(alternatives.map(candidate => toRoute(candidate).catch(() => null)))).filter(Boolean);
+    if (!scored.length) {
+      demoComparisonUnavailable = request.id;
+      if (status) status.textContent = 'Не удалось построить альтернативный маршрут';
+      return;
+    }
+    scored.sort((left, right) => right.eta - left.eta);
+    const human = scored[0];
+    const systemPoints = (systemTech.route || []).length > 1 ? systemTech.route : [[systemTech.x, systemTech.y], [standPoint.x, standPoint.y]];
+    const systemEta = pathLength(systemPoints) / Math.max(.1, Number(systemTech.speed || 1.3)) / 60;
+    demoComparison = {requestId:request.id, manualPoints:human.points, systemPoints, manualName:human.candidate.name || 'инженер', manualEta:human.eta, systemEta};
+    demoComparisonUnavailable = null;
+    const delta = human.eta - systemEta;
+    if (status) status.textContent = delta >= 0 ? `Оценка маршрута системы быстрее на ${delta.toFixed(1)} мин` : `Назначенный инженер быстрее на ${Math.abs(delta).toFixed(1)} мин`;
+    renderDemoTelemetry();
+    renderTacticalOverlay();
+  } catch (error) {
+    console.warn('Сравнение маршрутов недоступно', error);
+    if (status) status.textContent = 'Маршруты сравнить не удалось';
+  } finally {
+    demoComparisonLoading = null;
+  }
+}
+function nearestAirportNode(x, y) {
+  return (AIR.nodes || []).reduce((best, node) => !best || Math.hypot(node.x-x,node.y-y) < Math.hypot(best.x-x,best.y-y) ? node : best, null);
+}
+async function createDemoRequest({stand, description, qual='auto', extra='Демо-сценарий RampPulse'}) {
+  return api('/api/requests', {stand, description, qual, extra, priority:'normal'});
+}
+async function runDemoScenario(number, button) {
+  if (!AIR || !S || role !== 'dispatcher') return;
+  const buttons = [...document.querySelectorAll('[data-demo]')];
+  buttons.forEach(item => item.disabled = true);
+  const label = button.innerHTML;
+  button.textContent = 'ЗАПУСК…';
+  try {
+    const inUse = new Set((S.active || []).map(request => request.stand));
+    const stands = (AIR.stands || []).filter(item => !inUse.has(item.id));
+    const standAt = index => stands[index % Math.max(1, stands.length)] || AIR.stands[0];
+    let created = null;
+    if (number === 2) {
+      const target = standAt(0), tech = (S.techs || []).find(item => item.on_shift && item.status !== 'busy');
+      const start = tech ? nearestAirportNode(tech.x, tech.y) : null;
+      const goal = target && (AIR.nodes || []).find(node => node.id === target.node);
+      if (start && goal) {
+        const preview = await api('/api/routes/preview', {from:start.id, to:goal.id});
+        const path = new Set(preview.nodes || []);
+        const candidate = (AIR.edges || []).find(edge => edge.kind === 'taxiway' && !(S.blocked || []).includes(edge.id) && path.has(edge.a) && path.has(edge.b));
+        if (candidate) await api(`/api/edges/${encodeURIComponent(candidate.id)}/block`, {blocked:true});
+      }
+      created = await createDemoRequest({stand:target.id, description:'Объезд перекрытой рулёжной дорожки · проверка маршрутизации'});
+    } else if (number === 3) {
+      for (let i=0; i<3; i++) {
+        const target = standAt(i);
+        const result = await createDemoRequest({stand:target.id, description:`Пиковая нагрузка · борт ${i+1} из 3`});
+        if (i === 0) created = result;
+      }
+    } else if (number === 4) {
+      const target = standAt(0);
+      created = await createDemoRequest({stand:target.id, description:'Проверка дефицита допуска: требуется сертификация B1/B2', qual:'Сертификация B1/B2'});
+    } else {
+      const target = standAt(0);
+      created = await createDemoRequest({stand:target.id, description:number === 5 ? 'Сравнение выбора диспетчера и маршрута системы' : 'Штатный вызов инженера на перрон'});
+      if (number === 5) {
+        $('#demoCompare')?.setAttribute('aria-pressed','true');
+        document.body.classList.add('comparison-on');
+      }
+    }
+    await reloadOperationSnapshot();
+    const requestId = Number(created?.request?.id ?? created?.id);
+    const selected = (S.active || []).find(item => Number(item.id) === requestId) || (S.active || []).slice().sort((a,b)=>Number(b.id)-Number(a.id))[0];
+    if (selected) { selReq = selected.id; selTech = selected.tech_id || null; selAircraft = null; render(); }
+    toast(number === 2 ? 'Сценарий запущен: рулёжная дорожка перекрыта' : number === 3 ? 'Созданы три одновременные заявки' : number === 4 ? 'Сценарий дефицита допуска запущен' : 'Демо-сценарий запущен');
+  } catch (error) {
+    console.error('Не удалось запустить сценарий', error);
+  } finally {
+    buttons.forEach(item => item.disabled = false);
+    button.innerHTML = label;
+  }
 }
 
 function applyQueueSearch() {
@@ -1507,10 +1689,21 @@ function initUI() {
   const newSession = $('#newSession');
   if (newSession) newSession.addEventListener('click', async () => {
     newSession.disabled = true;
-    try { await window.otoBridge.openSession(); }
+    try {
+      await window.otoBridge.openSession();
+      toast('Окно второго аккаунта открыто. Этот чат остаётся в основном окне.');
+    }
     catch (error) { toast(window.otoBridge.errorMessage(error), true); }
     finally { newSession.disabled = false; }
   });
+  const compareToggle = $('#demoCompare');
+  if (compareToggle) compareToggle.addEventListener('click', () => {
+    const enabled = compareToggle.getAttribute('aria-pressed') !== 'true';
+    compareToggle.setAttribute('aria-pressed', String(enabled));
+    document.body.classList.toggle('comparison-on', enabled);
+    renderTacticalOverlay();
+  });
+  document.querySelectorAll('[data-demo]').forEach(button => button.addEventListener('click', () => runDemoScenario(Number(button.dataset.demo), button)));
   const sp = $('#speed'); if (sp) sp.onchange = e => api('/api/sim', {speed: +e.target.value}).catch(() => {});
   const simToggle = $('#simToggle'); if (simToggle) simToggle.onclick = () =>
     api('/api/sim', {running: S?.sim_running === false}).catch(() => {});

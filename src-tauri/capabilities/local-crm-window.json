@@ -6,5 +6,5 @@
   "remote": {
     "urls": ["http://127.0.0.1:*", "https://*.trycloudflare.com"]
   },
-  "permissions": ["core:window:allow-close", "core:event:allow-listen"]
+  "permissions": ["core:window:allow-close", "core:event:allow-listen", "allow-rampulse-backend"]
 }

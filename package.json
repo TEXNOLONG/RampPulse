@@ -1,11 +1,14 @@
 {
   "name": "ramppulse-desktop",
   "private": true,
-  "version": "0.3.5",
+  "version": "0.3.13",
   "scripts": {
     "tauri": "tauri",
     "desktop:dev": "node desktop/build_server.js && tauri dev",
     "desktop:build": "node desktop/build_server.js && tauri build",
+    "android:config": "node tools/android_tauri_config.mjs",
+    "android:prepare": "npm run android:config && tauri android init --ci && node tools/android_permissions.mjs",
+    "android:build": "npm run android:config && node tools/android_permissions.mjs && tauri android build --apk --target aarch64 --config src-tauri/tauri.android.conf.json",
     "ui:build": "tsc -p tsconfig.desktop.json && tsc -p tsconfig.bridge.json"
   },
   "devDependencies": {

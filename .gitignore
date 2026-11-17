@@ -23,3 +23,7 @@ build/
 dist/
 *.spec
 
+
+# Generated per-server Android CSP and remote Tauri capability
+src-tauri/tauri.android.conf.json
+src-tauri/capabilities/remote-server.json

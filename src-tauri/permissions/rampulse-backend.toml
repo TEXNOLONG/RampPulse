@@ -1,0 +1,23 @@
+[[permission]]
+identifier = "allow-rampulse-backend"
+description = "Enables the RampPulse desktop and chat backend commands used by the frontend bridge."
+commands.allow = [
+  "get_preferences",
+  "set_startup_view",
+  "consume_desktop_startup",
+  "realtime_protocol_version",
+  "load_airport_data",
+  "chat_initialize",
+  "chat_create_dm",
+  "chat_load_messages",
+  "chat_send_message",
+  "chat_receive_message",
+  "chat_mark_read",
+  "chat_mark_sent_read",
+  "call_emit_signal"
+]
+
+[[permission]]
+identifier = "allow-open-secondary-session"
+description = "Allows the primary RampPulse window to open an isolated secondary operator session."
+commands.allow = ["open_secondary_session"]

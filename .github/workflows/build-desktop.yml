@@ -1,0 +1,100 @@
+name: Build desktop and Android
+
+on:
+  push:
+    branches: [codex/rust-rewrite, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux DEB and RPM
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf libwebkit2gtk-4.1-dev rpm
+      - run: npm ci
+      - name: Build Rust sidecar
+        run: node desktop/build_server.js
+      - name: Build Tauri packages
+        run: npm run tauri -- build --bundles deb,rpm --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramppulse-linux
+          path: src-tauri/target/release/bundle/{deb,rpm}/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows MSI and NSIS
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build Rust sidecar
+        run: node desktop/build_server.js
+      - name: Build Tauri installers
+        run: npm run tauri -- build --bundles msi,nsis --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramppulse-windows
+          path: src-tauri/target/release/bundle/{msi,nsis}/*
+          if-no-files-found: error
+
+  android:
+    name: Android APK (arm64)
+    runs-on: ubuntu-22.04
+    env:
+      RAMPULSE_SERVER_URL: ${{ vars.RAMPULSE_SERVER_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Android SDK components
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+      - run: npm ci
+      - name: Require the production HTTPS server URL
+        shell: bash
+        run: |
+          if [[ ! "$RAMPULSE_SERVER_URL" =~ ^https:// ]]; then
+            echo "Set the repository variable RAMPULSE_SERVER_URL to the HTTPS address of the RampPulse Rust server." >&2
+            exit 1
+          fi
+      - name: Initialize Tauri Android project
+        run: npm run tauri -- android init --ci
+      - name: Generate host-locked Android CSP
+        run: npm run android:config
+      - name: Grant Android microphone runtime permissions
+        run: node tools/android_permissions.mjs
+      - name: Build Android APK
+        run: npm run tauri -- android build --apk --target aarch64 --config src-tauri/tauri.android.conf.json --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramppulse-android-arm64-apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

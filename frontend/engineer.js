@@ -510,7 +510,10 @@ async function init() {
   const newSession = $('#newSession');
   if (newSession) newSession.addEventListener('click', async () => {
     newSession.disabled = true;
-    try { await window.otoBridge.openSession(); }
+    try {
+      await window.otoBridge.openSession();
+      toast('Окно второго аккаунта открыто. Этот чат остаётся в основном окне.');
+    }
     catch (error) { toast(window.otoBridge.errorMessage(error), true); }
     finally { newSession.disabled = false; }
   });

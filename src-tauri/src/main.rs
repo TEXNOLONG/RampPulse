@@ -16,7 +16,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tauri::{utils::config::Color, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    utils::config::Color,
+    webview::{PermissionKind, PermissionResponse},
+    Emitter, Manager, State, Url, WebviewUrl, WebviewWindowBuilder,
+};
 
 struct Backend(Mutex<Option<Child>>);
 struct ServiceRuntime {
@@ -488,6 +492,14 @@ fn configured_server_url() -> Option<String> {
     }
 }
 
+fn is_trusted_microphone_origin(url: &Url, remote_origin: Option<&str>) -> bool {
+    let local_app = url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
+    let trusted_remote = remote_origin
+        .is_some_and(|origin| url.origin().ascii_serialization() == origin);
+    local_app || trusted_remote
+}
+
 fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String> {
     let binary_name = if cfg!(windows) {
         "ramppulse-server.exe"
@@ -623,6 +635,10 @@ fn main() {
             chat_database.connect().map_err(std::io::Error::other)?;
             app.manage(chat_database);
             let remote_base = configured_server_url();
+            let trusted_remote_origin = remote_base
+                .as_deref()
+                .and_then(|base| Url::parse(base).ok())
+                .map(|url| url.origin().ascii_serialization());
             let port_file = data_dir.join("service-port");
             let port = if remote_base.is_some() {
                 0
@@ -654,6 +670,19 @@ fn main() {
                 .ok_or_else(|| std::io::Error::other("Окно запуска не задано в tauri.conf.json"))?;
             let window = WebviewWindowBuilder::from_config(app, splash_config)
                 .map_err(std::io::Error::other)?
+                .on_permission_request(move |webview, kind| {
+                    if kind != PermissionKind::Microphone {
+                        return PermissionResponse::Default;
+                    }
+                    let allowed = webview.url().ok().is_some_and(|url| {
+                        is_trusted_microphone_origin(&url, trusted_remote_origin.as_deref())
+                    });
+                    if allowed {
+                        PermissionResponse::Allow
+                    } else {
+                        PermissionResponse::Deny
+                    }
+                })
                 .data_directory(profile)
                 .build()?;
 
@@ -756,6 +785,11 @@ fn open_secondary_session(
     } else {
         format!("http://127.0.0.1:{}/login", runtime.port)
     };
+    let trusted_remote_origin = runtime
+        .remote_base
+        .as_deref()
+        .and_then(|base| Url::parse(base).ok())
+        .map(|url| url.origin().ascii_serialization());
     WebviewWindowBuilder::new(
         &app,
         &label,
@@ -771,6 +805,19 @@ fn open_secondary_session(
     .background_color(Color(10, 14, 23, 255))
     .resizable(true)
     .maximized(true)
+    .on_permission_request(move |webview, kind| {
+        if kind != PermissionKind::Microphone {
+            return PermissionResponse::Default;
+        }
+        let allowed = webview.url().ok().is_some_and(|url| {
+            is_trusted_microphone_origin(&url, trusted_remote_origin.as_deref())
+        });
+        if allowed {
+            PermissionResponse::Allow
+        } else {
+            PermissionResponse::Deny
+        }
+    })
     .data_directory(profile)
     .build()
     .map(|_| ())

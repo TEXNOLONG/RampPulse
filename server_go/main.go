@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha1"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,7 +55,10 @@ func main() {
 		dbPath = filepath.Join(rootPath, "dispatch.db")
 	}
 
-	uploadPath = filepath.Join(rootPath, "uploads")
+	uploadPath = os.Getenv("CHAT_UPLOAD_DIR")
+	if uploadPath == "" {
+		uploadPath = filepath.Join(rootPath, "uploads")
+	}
 	_ = os.MkdirAll(uploadPath, 0755)
 
 	// Open SQLite DB
@@ -125,6 +132,7 @@ func main() {
 	mux.HandleFunc("GET /api/chat/search", handleChatSearch)
 	mux.HandleFunc("POST /api/chat/upload", handleChatUpload)
 	mux.HandleFunc("POST /api/calls/relay", handleCallRelay)
+	mux.HandleFunc("GET /api/calls/config", handleCallConfig)
 
 	// Dispatcher Endpoints
 	mux.HandleFunc("POST /api/requests", handleCreateRequest)
@@ -664,12 +672,25 @@ func handleChatUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mediaType := "file"
+	mediaType := mime.TypeByExtension(ext)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
 	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg":
-		mediaType = "image"
-	case ".wav", ".mp3", ".ogg", ".webm", ".m4a", ".aac":
-		mediaType = "audio_voice"
+	case ".png":
+		mediaType = "image/png"
+	case ".jpg", ".jpeg":
+		mediaType = "image/jpeg"
+	case ".gif":
+		mediaType = "image/gif"
+	case ".webp":
+		mediaType = "image/webp"
+	case ".bmp":
+		mediaType = "image/bmp"
+	case ".m4a":
+		mediaType = "audio/mp4"
+	case ".webm":
+		mediaType = "audio/webm"
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -703,7 +724,44 @@ func handleCallRelay(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
 }
 
-// --- Dispatcher Handlers ---
+func handleCallConfig(w http.ResponseWriter, r *http.Request) {
+	u := RequireUser(w, r)
+	if u == nil {
+		return
+	}
+
+	stunURLs := splitICEURLs(os.Getenv("STUN_URLS"))
+	if len(stunURLs) == 0 {
+		stunURLs = []string{"stun:stun.l.google.com:19302"}
+	}
+	iceServers := []map[string]interface{}{{"urls": stunURLs}}
+	turnURLs := splitICEURLs(os.Getenv("TURN_URLS"))
+	secret := os.Getenv("TURN_SHARED_SECRET")
+	if len(turnURLs) > 0 && secret != "" {
+		expires := time.Now().Add(6 * time.Hour).Unix()
+		username := fmt.Sprintf("%d:%d", expires, u.ID)
+		mac := hmac.New(sha1.New, []byte(secret))
+		_, _ = mac.Write([]byte(username))
+		iceServers = append(iceServers, map[string]interface{}{
+			"urls":       turnURLs,
+			"username":   username,
+			"credential": base64.StdEncoding.EncodeToString(mac.Sum(nil)),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ice_servers": iceServers})
+}
+
+func splitICEURLs(raw string) []string {
+	urls := make([]string, 0)
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if strings.HasPrefix(value, "stun:") || strings.HasPrefix(value, "stuns:") || strings.HasPrefix(value, "turn:") || strings.HasPrefix(value, "turns:") {
+			urls = append(urls, value)
+		}
+	}
+	return urls
+}
+
 
 func handleCreateRequest(w http.ResponseWriter, r *http.Request) {
 	if RequireDispatcher(w, r) == nil {

@@ -196,6 +196,7 @@ async function init() {
       const email = $('#regEmail').value.trim();
       const data = await request('/api/auth/register', {
         name: $('#regName').value.trim(),
+        username: $('#regUsername').value.trim().toLowerCase(),
         email,
         password: $('#regPassword').value,
         qual: $('#regQual').value,

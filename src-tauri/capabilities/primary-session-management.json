@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "primary-session-management",
+  "description": "Allow only the primary RampPulse window to create an isolated secondary session.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*", "https://*.trycloudflare.com"]
+  },
+  "permissions": ["allow-open-secondary-session"]
+}

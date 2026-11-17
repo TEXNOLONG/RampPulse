@@ -3,7 +3,7 @@
 const Map3D = (() => {
   const QCOL = {'Планер': '#7699C2', 'Двигатель': '#D99A42', 'Авионика': '#A391C2'};
   const AC_COL = {inbound: '#67A985', parked: '#7699C2', departing: '#D99A42'};
-  const PAPER = '#0C0E10';
+  const PAPER = '#0A1012';
   const FOV = 55 * Math.PI / 180;
   const H_TERMINAL = 20, H_HANGAR = 26;
 
@@ -86,20 +86,20 @@ const Map3D = (() => {
     ctx.stroke();
 
     // перроны
-    ctx.fillStyle = '#15181C';
+    ctx.fillStyle = '#10191B';
     for (const a of areas) {
       if (a.kind !== 'apron') continue;
       const pts = a.points.map(p => proj(cam, p[0], p[1], 0));
       if (pts.some(p => !p)) continue;
       const path = polyPath(pts);
       ctx.fill(path);
-      ctx.strokeStyle = '#24282D';
+      ctx.strokeStyle = '#263638';
       ctx.lineWidth = 1;
       ctx.stroke(path);
     }
     // разметка всех мест стоянок (только вблизи, чтобы не тратить кадры)
     if (!fast && dist < 5200) {
-      ctx.strokeStyle = 'rgba(130,140,153,.42)';
+      ctx.strokeStyle = 'rgba(117,177,181,.32)';
       ctx.lineWidth = Math.max(0.7, Math.min(2, screenScale(cam) * 4));
       const path = new Path2D();
       for (const p of park) {
@@ -115,7 +115,7 @@ const Map3D = (() => {
     const sc = screenScale(cam);
     for (const r of runways) {
       const w = Math.max(2, (r.width || 45) * sc);
-      ctx.strokeStyle = '#343A42';
+      ctx.strokeStyle = '#202E31';
       ctx.lineWidth = w;
       ctx.lineCap = 'butt';
       ctx.beginPath();
@@ -126,7 +126,7 @@ const Map3D = (() => {
         if (!started) { ctx.moveTo(p.x, p.y); started = true; } else ctx.lineTo(p.x, p.y);
       }
       ctx.stroke();
-      ctx.strokeStyle = 'rgba(163,170,180,.56)';
+      ctx.strokeStyle = 'rgba(131,211,221,.34)';
       ctx.lineWidth = Math.max(1, w * 0.045);
       ctx.setLineDash([Math.max(6, w * 0.8), Math.max(6, w * 0.6)]);
       ctx.stroke();
@@ -136,7 +136,7 @@ const Map3D = (() => {
     const tw = Math.max(0.9, Math.min(26, 22 * sc));
     for (const kind of ['taxiway', 'apron']) {
       const w = kind === 'apron' ? tw * 0.55 : tw;
-      ctx.strokeStyle = kind === 'apron' ? '#343A42' : '#2B3037';
+      ctx.strokeStyle = kind === 'apron' ? '#26383A' : '#314447';
       ctx.lineWidth = w;
       ctx.lineCap = 'round';
       ctx.beginPath();
@@ -158,7 +158,7 @@ const Map3D = (() => {
       const base = a.points.map(p => proj(cam, p[0], p[1], 0));
       const top = a.points.map(p => proj(cam, p[0], p[1], h));
       if (base.some(p => !p) || top.some(p => !p)) continue;
-      const rgb = a.kind === 'hangar' ? [38, 43, 50] : [48, 54, 62];
+      const rgb = a.kind === 'hangar' ? [23, 34, 36] : [31, 45, 47];
       const n = a.points.length;
       const topD = top.reduce((s, p) => s + p.d, 0) / n;
       faces.push({pts: top, d: topD - 0.01, fill: `rgb(${rgb[0]+22},${rgb[1]+21},${rgb[2]+19})`});
@@ -180,7 +180,7 @@ const Map3D = (() => {
       const p = polyPath(f.pts);
       ctx.fillStyle = f.fill;
       ctx.fill(p);
-      ctx.strokeStyle = 'rgba(150,160,172,.18)';
+      ctx.strokeStyle = 'rgba(142,193,194,.2)';
       ctx.lineWidth = 0.8;
       ctx.stroke(p);
     }
@@ -210,20 +210,20 @@ const Map3D = (() => {
       const isHot = hot[st.id], isEm = isHot === 'emergency', isSel = st.id === selStand;
       ctx.beginPath();
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = parked[st.id] ? 'rgba(118,153,194,.16)' : 'rgba(24,28,33,.84)';
+      ctx.fillStyle = parked[st.id] ? 'rgba(89,178,187,.14)' : 'rgba(13,22,23,.86)';
       ctx.fill();
       ctx.lineWidth = isSel ? 2.6 : 1.6;
-      ctx.strokeStyle = isSel ? '#D99A42' : isEm ? '#D16C68' : isHot ? '#D99A42' : '#555D67';
+      ctx.strokeStyle = isSel ? '#F1BE76' : isEm ? '#F27678' : isHot ? '#E7AD5E' : '#496164';
       ctx.stroke();
       // крест стоянки
-      ctx.strokeStyle = isEm ? '#D16C68' : '#555D67';
+      ctx.strokeStyle = isEm ? '#F27678' : '#496164';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(p.x - r*0.55, p.y); ctx.lineTo(p.x + r*0.55, p.y);
       ctx.moveTo(p.x, p.y - r*0.55); ctx.lineTo(p.x, p.y + r*0.55);
       ctx.stroke();
-      if (!fast && (dist < 2400 || isSel || isHot)) {
-        drawMapLabel(st.id, p.x, p.y + r + 14, isEm ? '#D16C68' : '#D99A42', '600 11px Inter, system-ui, sans-serif');
+      if (!fast && (isSel || isEm)) {
+        drawMapLabel(st.id, p.x, p.y + r + 14, isEm ? '#FF9B9D' : '#F1C27F', '600 11px Inter, system-ui, sans-serif');
       }
       hit.push({x: p.x, y: p.y, r: Math.max(12, r), type: 'stand', id: st.id});
     }
@@ -240,7 +240,7 @@ const Map3D = (() => {
       ctx.beginPath();
       ctx.rect(p.x - s/2, p.y - s/2, s, s);
       ctx.fill(); ctx.stroke();
-      if (!fast && dist < 3400) {
+      if (!fast && dist < 1100) {
         drawMapLabel(b.name, p.x, p.y + 24, '#9DA7B5', '500 10px Inter, system-ui, sans-serif');
       }
     }
@@ -292,7 +292,7 @@ const Map3D = (() => {
         ctx.stroke();
       }
       ctx.restore();
-      if (a.flight && (dist < 2500 || a.id === sel.aircraft)) {
+      if (a.flight && (a.id === sel.aircraft || (sel.stand && a.stand === sel.stand))) {
         drawMapLabel(a.flight, p.x, p.y - size - 6, '#E2E7ED', '600 9px Inter, system-ui, sans-serif');
       }
       hit.push({x: p.x, y: p.y, r: 14, type: 'aircraft', id: a.id});
@@ -340,7 +340,7 @@ const Map3D = (() => {
       ctx.fillRect(-size * .22, -size * .66, size * .14, size * .08);
       ctx.fillRect(size * .08, -size * .66, size * .14, size * .08);
       ctx.restore();
-      if (!fast && (dist < 1900 || v.id === sel.vehicle)) {
+      if (!fast && v.id === sel.vehicle) {
         drawMapLabel(`М${v.id}`, p.x, p.y + size + 10, '#D3D8E0', '600 9px Inter, system-ui, sans-serif');
       }
       hit.push({x: p.x, y: p.y, r: Math.max(11, size), type: 'vehicle', id: v.id});
