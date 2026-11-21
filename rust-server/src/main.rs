@@ -1,4 +1,5 @@
 mod airport_engine;
+mod push;
 mod realtime;
 mod store;
 
@@ -14,12 +15,13 @@ use axum::{
     Json, Router,
 };
 use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE},
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
 };
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -37,10 +39,12 @@ use ramppulse_core::{
 };
 use realtime::{Audience, RealtimeHub};
 use store::{AccountStore, NewEngineer, NewRequest, ShiftFailure};
+use push::PushService;
 
 const COOKIE_NAME: &str = "oto_session";
 const SESSION_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 const PBKDF2_ITERATIONS: u32 = 210_000;
+const CHAT_ATTACHMENT_LIMIT: u64 = 100 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
@@ -57,6 +61,10 @@ struct AppState {
     stun_urls: Vec<String>,
     turn_urls: Vec<String>,
     turn_shared_secret: Option<String>,
+    livekit_url: Option<String>,
+    livekit_api_key: Option<String>,
+    livekit_api_secret: Option<String>,
+    push: Option<PushService>,
     login_guard: Arc<std::sync::Mutex<std::collections::HashMap<String, LoginAttempts>>>,
 }
 
@@ -164,6 +172,8 @@ struct CallRelayBody {
     recipient_id: i64,
     signal: serde_json::Value,
 }
+#[derive(Deserialize)]
+struct PushDeviceBody { token: String }
 
 #[derive(Deserialize)]
 struct SimulationBody {
@@ -239,6 +249,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turn_shared_secret: env::var("TURN_SHARED_SECRET")
             .ok()
             .filter(|value| !value.is_empty()),
+        livekit_url: env::var("LIVEKIT_URL").ok().filter(|value| !value.is_empty()),
+        livekit_api_key: env::var("LIVEKIT_API_KEY").ok().filter(|value| !value.is_empty()),
+        livekit_api_secret: env::var("LIVEKIT_API_SECRET").ok().filter(|value| !value.is_empty()),
+        push: PushService::from_env(),
         login_guard: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
@@ -256,6 +270,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/profile", get(profile).post(update_profile))
         .route("/api/profile/password", post(change_password))
         .route("/api/presence", get(presence))
+        .route("/api/push/register", post(register_push_device))
+        .route("/api/push/status", get(push_status))
+        .route("/api/calls/pending", get(pending_call_invites))
+        .route("/api/calls/livekit-token", post(livekit_token))
+        .route("/api/push/unregister", post(unregister_push_device))
         .route("/api/chat/rooms/{id}/typing", post(chat_typing))
         .route("/api/airport", get(airport))
         .route("/api/state", get(state_snapshot))
@@ -301,7 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/chat/rooms/{id}/read", post(mark_chat_read))
         .route(
             "/api/chat/rooms/{id}/attachments",
-            post(upload_chat_attachment).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+            post(upload_chat_attachment).layer(DefaultBodyLimit::max(CHAT_ATTACHMENT_LIMIT as usize)),
         )
         .route("/api/chat/attachments/{id}", get(download_chat_attachment))
         .route("/api/calls/relay", post(relay_call_signal))
@@ -1030,6 +1049,14 @@ async fn create_request(
         }),
         payload,
     );
+    if let Some(tech_id) = request.tech_id {
+        let store = state.store.clone();
+        let recipient = task::spawn_blocking(move || store.engineer_user_id(tech_id)).await
+            .ok().and_then(Result::ok).flatten();
+        if let Some(recipient) = recipient {
+            push_user(&state, recipient, "Новая заявка RampPulse", &format!("{} · {}", request.stand, request.description), json!({"kind":"request","request_id":request.id}));
+        }
+    }
     Ok(Json(
         serde_json::json!({ "id": request.id, "status": request.status, "request": request }),
     ))
@@ -1388,6 +1415,7 @@ async fn send_chat_message(
             }),
             payload.clone(),
         );
+        push_user(&state, recipient, if message.kind == "voice" { "Голосовое сообщение RampPulse" } else { "Сообщение RampPulse" }, if message.kind == "text" { &message.body } else { &message.content }, json!({"kind":"chat","room_id":room_id,"message_id":message.id}));
     }
     Ok(Json(serde_json::json!({"message":message})))
 }
@@ -1480,12 +1508,12 @@ async fn upload_chat_attachment(
             }
         };
         byte_size = byte_size.saturating_add(chunk.len() as u64);
-        if byte_size > 15 * 1024 * 1024 {
+        if byte_size > CHAT_ATTACHMENT_LIMIT {
             drop(file);
             let _ = tokio::fs::remove_file(&temporary_path).await;
             return Err(HttpError(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "Файл должен быть меньше 15 МБ",
+                "Файл должен быть меньше 100 МБ",
             ));
         }
         if file.write_all(&chunk).await.is_err() {
@@ -1601,6 +1629,7 @@ async fn upload_chat_attachment(
             }),
             payload.clone(),
         );
+        push_user(&state, recipient, if message.kind == "voice" { "Голосовое сообщение RampPulse" } else { "Вложение RampPulse" }, &message.content, json!({"kind":"chat","room_id":room_id,"message_id":message.id}));
     }
     Ok(Json(serde_json::json!({"message":message})))
 }
@@ -1694,56 +1723,27 @@ fn normalized_upload_type(supplied: &str, file_name: &str) -> Option<String> {
         .unwrap_or("")
         .to_ascii_lowercase();
     let inferred = match extension.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "pdf" => "application/pdf",
-        "txt" | "log" => "text/plain",
-        "zip" => "application/zip",
-        "doc" => "application/msword",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xls" => "application/vnd.ms-excel",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "webm" => "audio/webm",
-        "ogg" | "oga" => "audio/ogg",
-        "mp3" => "audio/mpeg",
-        "m4a" | "mp4" => "audio/mp4",
-        "wav" => "audio/wav",
+        "jpg" | "jpeg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", "bmp" => "image/bmp", "tif" | "tiff" => "image/tiff",
+        "pdf" => "application/pdf", "txt" | "log" => "text/plain", "md" => "text/markdown", "csv" => "text/csv", "json" => "application/json", "xml" => "application/xml",
+        "zip" => "application/zip", "7z" => "application/x-7z-compressed", "rar" => "application/vnd.rar", "tar" => "application/x-tar", "gz" => "application/gzip",
+        "doc" => "application/msword", "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "odt" => "application/vnd.oasis.opendocument.text",
+        "xls" => "application/vnd.ms-excel", "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "ppt" => "application/vnd.ms-powerpoint", "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation", "odp" => "application/vnd.oasis.opendocument.presentation",
+        "webm" => "audio/webm", "ogg" | "oga" => "audio/ogg", "mp3" => "audio/mpeg", "m4a" => "audio/mp4", "wav" => "audio/wav", "aac" => "audio/aac", "flac" => "audio/flac",
+        "mpg" | "mpeg" => "video/mpeg", "mov" => "video/quicktime", "mkv" => "video/x-matroska", "avi" => "video/x-msvideo", "mp4" => "video/mp4",
         _ => "",
     };
-    let media = if matches!(
-        supplied.as_str(),
-        "image/jpeg"
-            | "image/png"
-            | "image/webp"
-            | "image/gif"
-            | "application/pdf"
-            | "text/plain"
-            | "application/zip"
-            | "application/msword"
-            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            | "application/vnd.ms-excel"
-            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            | "application/vnd.ms-powerpoint"
-            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            | "audio/webm"
-            | "audio/ogg"
-            | "audio/mpeg"
-            | "audio/mp4"
-            | "audio/wav"
-    ) {
-        supplied.as_str()
-    } else {
-        inferred
-    };
-    if media.is_empty() {
-        None
-    } else {
-        Some(media.to_owned())
-    }
+    let allowed = matches!(supplied.as_str(),
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/bmp" | "image/tiff" |
+        "application/pdf" | "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/xml" | "text/xml" |
+        "application/zip" | "application/x-7z-compressed" | "application/vnd.rar" | "application/x-rar-compressed" | "application/x-tar" | "application/gzip" | "application/x-gzip" |
+        "application/msword" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.oasis.opendocument.text" |
+        "application/vnd.ms-excel" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.oasis.opendocument.spreadsheet" |
+        "application/vnd.ms-powerpoint" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "application/vnd.oasis.opendocument.presentation" |
+        "audio/webm" | "audio/ogg" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "audio/aac" | "audio/flac" |
+        "video/mpeg" | "video/quicktime" | "video/x-matroska" | "video/x-msvideo" | "video/webm" | "video/mp4");
+    let media = if allowed { supplied.as_str() } else { inferred };
+    (!media.is_empty()).then(|| media.to_owned())
 }
 
 fn extension_for_media(media_type: &str) -> &'static str {
@@ -1752,20 +1752,41 @@ fn extension_for_media(media_type: &str) -> &'static str {
         "image/png" => "png",
         "image/webp" => "webp",
         "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
         "application/pdf" => "pdf",
         "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
         "application/zip" => "zip",
+        "application/x-7z-compressed" => "7z",
+        "application/vnd.rar" | "application/x-rar-compressed" => "rar",
+        "application/x-tar" => "tar",
+        "application/gzip" | "application/x-gzip" => "gz",
         "application/msword" => "doc",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.oasis.opendocument.text" => "odt",
         "application/vnd.ms-excel" => "xls",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
         "application/vnd.ms-powerpoint" => "ppt",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.presentation" => "odp",
         "audio/webm" => "webm",
         "audio/ogg" => "ogg",
         "audio/mpeg" => "mp3",
         "audio/mp4" => "m4a",
         "audio/wav" => "wav",
+        "audio/aac" => "aac",
+        "audio/flac" => "flac",
+        "video/mpeg" => "mpeg",
+        "video/quicktime" => "mov",
+        "video/x-matroska" => "mkv",
+        "video/x-msvideo" => "avi",
+        "video/webm" => "webm",
+        "video/mp4" => "mp4",
         _ => "bin",
     }
 }
@@ -1853,17 +1874,66 @@ async fn relay_call_signal(
     if !payload.contains_key("call_id") {
         payload.insert("call_id".into(), serde_json::json!(""));
     }
+    let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    if signal_kind == "invite" && !call_id.is_empty() {
+        let store = state.store.clone(); let data = serde_json::Value::Object(payload.clone());
+        let caller = actor.id; let recipient = body.recipient_id; let save_id = call_id.clone();
+        task::spawn_blocking(move || store.save_call_invite(&save_id, caller, recipient, &data)).await
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить вызов"))?;
+    } else if matches!(signal_kind,"answer"|"reject"|"decline"|"hangup"|"busy") && !call_id.is_empty() {
+        let store=state.store.clone(); let clear_id=call_id.clone();
+        let _=task::spawn_blocking(move || store.clear_call_invite(&clear_id)).await;
+    }
     state.realtime.publish(
         kind,
         Audience::User(body.recipient_id),
         Some(ActorRef {
             user_id: actor.id,
-            role: actor.role,
+            role: actor.role.clone(),
         }),
         None,
         serde_json::Value::Object(payload),
     );
+    if signal_kind == "invite" {
+        push_user(&state, body.recipient_id, "Входящий вызов RampPulse", &actor.name, json!({"kind":"call","call_id":call_id,"from_user_id":actor.id,"from_name":actor.name}));
+    }
     Ok(Json(serde_json::json!({"ok":true})))
+}
+
+async fn register_push_device(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<PushDeviceBody>) -> Result<Json<serde_json::Value>, HttpError> {
+    let user=authenticated_user(&state,&headers).await?; let token=body.token.trim().to_owned();
+    if token.len()<32 || token.len()>4096 || token.chars().any(char::is_whitespace) { return Err(HttpError(StatusCode::BAD_REQUEST,"Некорректный токен устройства")); }
+    let store=state.store.clone();
+    task::spawn_blocking(move || store.register_push_device(user.id,&token)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Не удалось зарегистрировать устройство"))?;
+    Ok(Json(json!({"ok":true,"push_enabled":state.push.is_some()})))
+}
+
+async fn push_status(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, HttpError> {
+    let _user = authenticated_user(&state, &headers).await?;
+    Ok(Json(json!({"enabled": state.push.is_some()})))
+}
+
+async fn unregister_push_device(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<PushDeviceBody>) -> Result<Json<serde_json::Value>, HttpError> {
+    let user=authenticated_user(&state,&headers).await?; let token=body.token;
+    let store=state.store.clone();
+    task::spawn_blocking(move || store.unregister_push_device(user.id,&token)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn pending_call_invites(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, HttpError> {
+    let user=authenticated_user(&state,&headers).await?; let store=state.store.clone();
+    let invites=task::spawn_blocking(move || store.pending_call_invites(user.id)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Не удалось загрузить вызовы"))?;
+    Ok(Json(json!({"invites":invites})))
+}
+
+fn push_user(state: &AppState, user_id: i64, title: &str, body: &str, data: serde_json::Value) {
+    let Some(push)=state.push.clone() else { return; }; let store=state.store.clone(); let cleanup_store=state.store.clone();
+    let title=title.to_owned(); let body=body.to_owned();
+    tokio::spawn(async move {
+        let Ok(Ok(tokens))=task::spawn_blocking(move || store.push_tokens(user_id)).await else { return; };
+        for token in tokens { let push=push.clone(); let title=title.clone(); let body=body.clone(); let data=data.clone(); let cleanup=cleanup_store.clone(); tokio::spawn(async move { if let Err(e)=push.send(&token,&title,&body,data).await { if e.contains("UNREGISTERED") || e.contains("NOT_FOUND") { let _=task::spawn_blocking(move || cleanup.remove_push_device(&token)).await; } else { eprintln!("RampPulse push delivery failed: {e}"); } } }); }
+    });
 }
 
 async fn call_config(
@@ -1895,6 +1965,58 @@ async fn call_config(
         }
     }
     Ok(Json(serde_json::json!({"ice_servers":ice_servers})))
+}
+
+#[derive(Deserialize)]
+struct LiveKitTokenBody {
+    call_id: String,
+}
+
+async fn livekit_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LiveKitTokenBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let actor = authenticated_user(&state, &headers).await?;
+    let call_id = Uuid::parse_str(body.call_id.trim()).map_err(|_| {
+        HttpError(StatusCode::BAD_REQUEST, "Некорректный идентификатор звонка")
+    })?;
+    let (Some(url), Some(api_key), Some(api_secret)) = (
+        state.livekit_url.as_deref(),
+        state.livekit_api_key.as_deref(),
+        state.livekit_api_secret.as_deref(),
+    ) else {
+        return Err(HttpError(StatusCode::SERVICE_UNAVAILABLE, "Сервис голосовой связи не настроен"));
+    };
+    let room = format!("rp-{}", call_id.simple());
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let claims = json!({
+        "iss": api_key,
+        "sub": actor.id.to_string(),
+        "name": actor.name,
+        "nbf": now - 5,
+        "iat": now,
+        "exp": now + 600,
+        "video": {
+            "roomJoin": true,
+            "room": room,
+            "canPublish": true,
+            "canSubscribe": true,
+            "canPublishData": true
+        }
+    });
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(|_| {
+        HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось подготовить токен связи")
+    })?);
+    let signing_input = format!("{header}.{payload}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(api_secret.as_bytes()).map_err(|_| {
+        HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка конфигурации связи")
+    })?;
+    mac.update(signing_input.as_bytes());
+    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    let token = format!("{signing_input}.{signature}");
+    Ok(Json(json!({"url": url, "token": token, "room": room})))
 }
 
 async fn login(

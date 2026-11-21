@@ -14,7 +14,10 @@ commands.allow = [
   "chat_receive_message",
   "chat_mark_read",
   "chat_mark_sent_read",
-  "call_emit_signal"
+  "call_emit_signal",
+  "native_call_connect",
+  "native_call_disconnect",
+  "native_call_set_muted"
 ]
 
 [[permission]]

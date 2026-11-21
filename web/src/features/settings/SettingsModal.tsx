@@ -7,6 +7,7 @@ import { get, post, errorText } from '../../lib/api';
 import { cx, timeHM } from '../../lib/format';
 import type { User } from '../../lib/types';
 import { desktop } from '../../lib/desktop';
+import { Logo } from '../../components/BootScreen';
 
 export type SettingsTab = 'profile' | 'security' | 'notifications' | 'appearance' | 'devices' | 'about';
 
@@ -160,24 +161,63 @@ function SecurityTab() {
 function NotificationsTab() {
   const p = usePrefs();
   const [perm, setPerm] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'denied');
+  const android = !!window.RampPulseAndroid;
+  const readNativePermission = () => window.RampPulseAndroid?.notificationsEnabled?.() ?? (typeof Notification !== 'undefined' && Notification.permission === 'granted');
+  const [nativeAllowed, setNativeAllowed] = useState(readNativePermission);
+  const [pushReady, setPushReady] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!android) return;
+    let active = true;
+    void get<{ enabled: boolean }>('/api/push/status')
+      .then(result => { if (active) setPushReady(result.enabled); })
+      .catch(() => { if (active) setPushReady(false); });
+    return () => { active = false; };
+  }, [android]);
   return (
     <div className="stack">
-      <Row title="Звук новых сообщений" text="Короткий сигнал, когда чат свёрнут"><Switch checked={p.sound} onChange={v => p.set({ sound: v })} /></Row>
-      <Row title="Системные уведомления" text={perm === 'denied' ? 'Запрещены в системе — разрешите в настройках ОС' : 'Сообщения и входящие звонки, когда окно неактивно'}>
-        <Switch checked={p.desktopNotifications && perm === 'granted'} onChange={async v => {
-          if (v && typeof Notification !== 'undefined' && Notification.permission !== 'granted') { const r = await Notification.requestPermission(); setPerm(r); if (r !== 'granted') return; }
-          p.set({ desktopNotifications: v });
-        }} />
-      </Row>
-      <Row title="Проверить уведомление" text="Покажет пример сообщения"><Button size="sm" onClick={() => toast.info('Так выглядит новое сообщение в чате', 'Иванов И. И.')}>Показать</Button></Row>
+      {android ? <>
+        <Row title="Уведомления телефона" text={nativeAllowed ? 'Разрешены в Android' : 'Разрешите показывать звонки и сообщения, когда RampPulse закрыт'}>
+          <Button size="sm" variant={nativeAllowed ? 'subtle' : 'primary'} onClick={() => {
+            window.RampPulseAndroid?.requestNotifications();
+            window.setTimeout(() => setNativeAllowed(readNativePermission()), 700);
+          }}>{nativeAllowed ? 'Проверить' : 'Разрешить'}</Button>
+        </Row>
+        <div className="card-block subtle">
+          <b>{pushReady === null ? 'Проверяем доставку…' : pushReady ? 'Фоновая доставка включена' : 'Фоновая доставка не настроена'}</b>
+          <p>{pushReady ? 'Звонки, сообщения и назначенные заявки будут приходить, когда RampPulse закрыт.' : 'Для доставки в фоне нужен Firebase Cloud Messaging: файл приложения Firebase и серверный ключ. Без них Android не сможет показать уведомления из закрытого приложения.'}</p>
+        </div>
+      </> : <>
+        <Row title="Звук новых сообщений" text="Короткий сигнал, когда чат свёрнут"><Switch checked={p.sound} onChange={v => p.set({ sound: v })} /></Row>
+        <Row title="Системные уведомления" text={perm === 'denied' ? 'Запрещены в системе — разрешите в настройках ОС' : 'Сообщения и входящие звонки, когда окно неактивно'}>
+          <Switch checked={p.desktopNotifications && perm === 'granted'} onChange={async v => {
+            if (v && typeof Notification !== 'undefined' && Notification.permission !== 'granted') { const r = await Notification.requestPermission(); setPerm(r); if (r !== 'granted') return; }
+            p.set({ desktopNotifications: v });
+          }} />
+        </Row>
+        <Row title="Проверить уведомление" text="Покажет пример сообщения"><Button size="sm" onClick={() => toast.info('Так выглядит новое сообщение в чате', 'Иванов И. И.')}>Показать</Button></Row>
+      </>}
     </div>
   );
 }
 
 function AppearanceTab() {
   const p = usePrefs();
+  const themes = [
+    { value: 'indigo', label: 'Ночная', color: '#7778f7' },
+    { value: 'aviation', label: 'Авиационная', color: '#42a8e8' },
+    { value: 'amber', label: 'Янтарная', color: '#e7a43d' },
+    { value: 'teal', label: 'Бирюзовая', color: '#36c2ae' },
+  ] as const;
   return (
     <div className="stack">
+      <div className="theme-setting">
+        <div><b>Цветовая тема</b><span>Акцент и тон интерфейса на этом устройстве</span></div>
+        <div className="theme-picker" role="group" aria-label="Цветовая тема">
+          {themes.map(theme => <button key={theme.value} type="button" className={cx('theme-choice', p.theme === theme.value && 'selected')} aria-pressed={p.theme === theme.value} onClick={() => p.set({ theme: theme.value })}>
+            <i style={{ background: theme.color }} /><span>{theme.label}</span>
+          </button>)}
+        </div>
+      </div>
       <Row title="Подписи на карте" text="Номера стоянок, баз и терминалов"><Switch checked={p.mapLabels} onChange={v => p.set({ mapLabels: v })} /></Row>
       <Row title="Маршруты всех инженеров" text="Иначе показывается только выбранный маршрут"><Switch checked={p.mapRoutes} onChange={v => p.set({ mapRoutes: v })} /></Row>
       <Row title="Уменьшить анимацию" text="Без плавных перелётов камеры и пульсаций — легче для слабых ПК"><Switch checked={p.reduceMotion} onChange={v => p.set({ reduceMotion: v })} /></Row>
@@ -246,7 +286,7 @@ function AboutTab() {
   useEffect(() => { measure(); }, []);
   return (
     <div className="stack">
-      <div className="about-hero"><span className="logo" style={{ width: 52, height: 52 }}><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.7" /><path d="M12 12 18 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /><circle cx="12" cy="12" r="1.7" fill="currentColor" /></svg></span><div><b>RampPulse</b><span>Диспетчеризация инженеров перрона · v0.5</span></div></div>
+      <div className="about-hero"><Logo size={52} /><div><b>RampPulse</b><span>Диспетчеризация инженеров перрона · v0.5.6</span></div></div>
       <div className="info-list">
         <div><span>Сервер</span><b>{location.host}</b></div>
         <div><span>Аэропорт</span><b>{airport?.name}</b></div>

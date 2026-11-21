@@ -8,6 +8,7 @@ raw_*.json
 node_modules/
 .desktop-build/
 src-tauri/target/
+src-tauri/gen/android/
 target/
 rust-server/target/
 src-tauri/resources/server/ramppulse-server*
@@ -15,10 +16,13 @@ src-tauri/resources/server/airport-crm-server*
 desktop/pkg/
 desktop/__pycache__/
 desktop/*.pkg.tar.zst
+desktop/ramppulse-*.pkg/
 release/*.pkg.tar.zst
 release/*.deb
 release/*.rpm
 release/*.zip
+release/*.apk
+release/*.idsig
 build/
 dist/
 *.spec
@@ -27,3 +31,8 @@ dist/
 # Generated per-server Android CSP and remote Tauri capability
 src-tauri/tauri.android.conf.json
 src-tauri/capabilities/remote-server.json
+
+# Firebase service credentials and Android app configuration contain project secrets/IDs.
+src-tauri/android/google-services.json
+src-tauri/gen/android/app/google-services.json
+firebase-adminsdk*.json

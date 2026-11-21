@@ -19,7 +19,25 @@ const csp = [
   "object-src 'none'",
   "base-uri 'self'",
 ].join('; ');
-const config = { app: { security: { csp } } };
+const config = {
+  app: {
+    windows: [{
+      label: 'main',
+      create: false,
+      url: `${origin}/login`,
+      title: 'RampPulse · Рабочее место инженера',
+      width: 412,
+      height: 915,
+      resizable: true,
+      fullscreen: false,
+      decorations: false,
+      transparent: false,
+      center: true,
+      backgroundColor: '#09090B',
+    }],
+    security: { csp },
+  },
+};
 fs.writeFileSync('src-tauri/tauri.android.conf.json', `${JSON.stringify(config, null, 2)}\n`);
 const capability = {
   identifier: 'rampulse-production-server',

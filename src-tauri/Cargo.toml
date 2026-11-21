@@ -1,9 +1,13 @@
 [package]
 name = "ramppulse"
-version = "0.5.0"
+version = "0.5.6"
 description = "Airport operations desktop application"
 authors = ["RampPulse"]
 edition = "2021"
+
+[lib]
+name = "ramppulse_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -13,3 +17,6 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ramppulse-core = { path = "../rust-core" }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+livekit = { version = "0.11", features = ["rustls-tls-native-roots"] }

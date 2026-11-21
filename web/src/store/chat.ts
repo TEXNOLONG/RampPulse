@@ -131,7 +131,7 @@ export const useChat = create<ChatStore>((set, getState) => ({
   },
 
   async sendFile(file) {
-    if (file.size > 15 * 1024 * 1024) { toast.bad('Файл больше 15 МБ'); return; }
+    if (file.size > 100 * 1024 * 1024) { toast.bad('Файл больше 100 МБ'); return; }
     const url = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
     await sendOptimistic({ kind: 'file', media_url: url, media_type: file.type, media_name: file.name },
       roomId => upload(`/api/chat/rooms/${roomId}/attachments`, file, { 'x-chat-kind': 'file', 'x-chat-file-name': encodeURIComponent(file.name) }));

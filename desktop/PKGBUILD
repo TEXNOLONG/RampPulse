@@ -1,5 +1,5 @@
 pkgname=ramppulse
-pkgver=0.5.0
+pkgver=0.5.6
 pkgrel=1
 pkgdesc='RampPulse · Операционный центр для аэропортовых служб'
 arch=('x86_64')

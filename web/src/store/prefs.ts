@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 export interface Prefs {
+  theme: 'indigo' | 'aviation' | 'amber' | 'teal';
   sound: boolean;
   desktopNotifications: boolean;
   reduceMotion: boolean;
@@ -14,6 +15,7 @@ export interface Prefs {
 
 const KEY = 'ramppulse.prefs.v1';
 const defaults: Prefs = {
+  theme: 'indigo',
   sound: true,
   desktopNotifications: false,
   reduceMotion: false,
@@ -26,13 +28,25 @@ const defaults: Prefs = {
 };
 
 function load(): Prefs {
-  try { return { ...defaults, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch { return defaults; }
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    const theme = ['indigo', 'aviation', 'amber', 'teal'].includes(saved.theme) ? saved.theme : defaults.theme;
+    return { ...defaults, ...saved, theme };
+  } catch { return defaults; }
 }
 
+function applyTheme(theme: Prefs['theme']) {
+  if (typeof document !== 'undefined') document.documentElement.dataset.theme = theme;
+}
+
+const initial = load();
+applyTheme(initial.theme);
+
 export const usePrefs = create<Prefs & { set(patch: Partial<Prefs>): void }>(set => ({
-  ...load(),
+  ...initial,
   set: patch => set(s => {
     const next = { ...s, ...patch };
+    applyTheme(next.theme);
     try {
       const { set: _ignored, ...plain } = next as any;
       localStorage.setItem(KEY, JSON.stringify(plain));

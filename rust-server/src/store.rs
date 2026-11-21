@@ -214,6 +214,9 @@ impl AccountStore {
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_rust_sessions_user ON rust_sessions(user_id);
+            CREATE TABLE IF NOT EXISTS push_devices(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+            CREATE INDEX IF NOT EXISTS idx_push_devices_user ON push_devices(user_id);
+            CREATE TABLE IF NOT EXISTS call_invites(call_id TEXT PRIMARY KEY,caller_id INTEGER NOT NULL,recipient_id INTEGER NOT NULL,payload TEXT NOT NULL,expires_at INTEGER NOT NULL,FOREIGN KEY(caller_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS registrations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL UNIQUE,
@@ -264,7 +267,7 @@ impl AccountStore {
                 uploader_id INTEGER NOT NULL,
                 file_name TEXT NOT NULL,
                 media_type TEXT NOT NULL,
-                byte_size INTEGER NOT NULL CHECK(byte_size > 0 AND byte_size <= 15728640),
+                byte_size INTEGER NOT NULL CHECK(byte_size > 0 AND byte_size <= 104857600),
                 storage_name TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(room_id) REFERENCES chat_rooms(id) ON DELETE CASCADE,
@@ -300,6 +303,7 @@ impl AccountStore {
                 SELECT 'shift','Общий канал смены',strftime('%Y-%m-%dT%H:%M:%fZ','now')
                 WHERE NOT EXISTS (SELECT 1 FROM chat_rooms WHERE kind='shift');"
         )?;
+        migrate_attachment_limit(&connection)?;
         if let Some(table) = legacy_requests {
             let legacy_rows = {
                 let mut statement =
@@ -1190,6 +1194,44 @@ impl AccountStore {
         room_recipients(&connection, room_id, user_id)
     }
 
+    pub fn register_push_device(&self, user_id: i64, token: &str) -> rusqlite::Result<()> {
+        let connection = self.connection()?;
+        connection.execute("INSERT INTO push_devices(token,user_id,updated_at) VALUES(?1,?2,?3) ON CONFLICT(token) DO UPDATE SET user_id=excluded.user_id,updated_at=excluded.updated_at", params![token,user_id,now_rfc3339()])?;
+        Ok(())
+    }
+    pub fn push_tokens(&self, user_id: i64) -> rusqlite::Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT token FROM push_devices WHERE user_id=?1")?;
+        let rows = statement.query_map([user_id], |row| row.get(0))?.collect();
+        rows
+    }
+    pub fn unregister_push_device(&self, user_id: i64, token: &str) -> rusqlite::Result<()> {
+        self.connection()?.execute("DELETE FROM push_devices WHERE token=?1 AND user_id=?2", params![token,user_id])?;
+        Ok(())
+    }
+    pub fn remove_push_device(&self, token: &str) -> rusqlite::Result<()> {
+        self.connection()?.execute("DELETE FROM push_devices WHERE token=?1", [token])?;
+        Ok(())
+    }
+    pub fn save_call_invite(&self, call_id: &str, caller: i64, recipient: i64, payload: &serde_json::Value) -> rusqlite::Result<()> {
+        let connection = self.connection()?;
+        let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64 + 90;
+        connection.execute("INSERT OR REPLACE INTO call_invites(call_id,caller_id,recipient_id,payload,expires_at) VALUES(?1,?2,?3,?4,?5)", params![call_id,caller,recipient,payload.to_string(),expiry])?;
+        Ok(())
+    }
+    pub fn pending_call_invites(&self, user_id: i64) -> rusqlite::Result<Vec<serde_json::Value>> {
+        let connection = self.connection()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        connection.execute("DELETE FROM call_invites WHERE expires_at<=?1", [now])?;
+        let mut statement = connection.prepare("SELECT payload FROM call_invites WHERE recipient_id=?1 AND expires_at>?2 ORDER BY expires_at DESC")?;
+        let rows = statement.query_map(params![user_id,now], |row| row.get::<_,String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?).unwrap_or(serde_json::Value::Null))).collect()
+    }
+    pub fn clear_call_invite(&self, call_id: &str) -> rusqlite::Result<()> {
+        self.connection()?.execute("DELETE FROM call_invites WHERE call_id=?1", [call_id])?;
+        Ok(())
+    }
+
     pub fn create_chat_attachment(
         &self,
         id: &str,
@@ -1333,6 +1375,25 @@ impl AccountStore {
             [id], read_request,
         )
     }
+}
+
+fn migrate_attachment_limit(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = connection.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_attachments'", [], |row| row.get(0)).optional()?;
+    if !sql.is_some_and(|value| value.contains("15728640")) { return Ok(()); }
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let result = connection.execute_batch("BEGIN IMMEDIATE;
+        DROP INDEX IF EXISTS idx_chat_messages_room_id; DROP INDEX IF EXISTS idx_chat_attachments_room;
+        ALTER TABLE chat_messages RENAME TO chat_messages_legacy;
+        ALTER TABLE chat_attachments RENAME TO chat_attachments_legacy;
+        CREATE TABLE chat_attachments(id TEXT PRIMARY KEY,room_id INTEGER NOT NULL,uploader_id INTEGER NOT NULL,file_name TEXT NOT NULL,media_type TEXT NOT NULL,byte_size INTEGER NOT NULL CHECK(byte_size>0 AND byte_size<=104857600),storage_name TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,FOREIGN KEY(room_id) REFERENCES chat_rooms(id) ON DELETE CASCADE,FOREIGN KEY(uploader_id) REFERENCES users(id) ON DELETE CASCADE);
+        INSERT INTO chat_attachments SELECT * FROM chat_attachments_legacy;
+        CREATE TABLE chat_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,room_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,message_kind TEXT NOT NULL CHECK(message_kind IN ('text','sticker','file','voice')),content TEXT NOT NULL,created_at TEXT NOT NULL,attachment_id TEXT,duration_sec INTEGER,CHECK ((message_kind IN ('file','voice') AND attachment_id IS NOT NULL) OR (message_kind IN ('text','sticker') AND attachment_id IS NULL)),FOREIGN KEY(room_id) REFERENCES chat_rooms(id) ON DELETE CASCADE,FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(attachment_id) REFERENCES chat_attachments(id));
+        INSERT INTO chat_messages SELECT * FROM chat_messages_legacy;
+        DROP TABLE chat_messages_legacy; DROP TABLE chat_attachments_legacy;
+        CREATE INDEX idx_chat_attachments_room ON chat_attachments(room_id,created_at); CREATE INDEX idx_chat_messages_room_id ON chat_messages(room_id,id); COMMIT;");
+    if result.is_err() { let _ = connection.execute_batch("ROLLBACK;"); }
+    let restore = connection.pragma_update(None, "foreign_keys", true);
+    result?; restore?; Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { get, post } from '../lib/api';
 import { realtime } from '../lib/realtime';
 import type { Airport, Meta, RealtimePacket, ShiftState, User } from '../lib/types';
+import { registerAndroidPush, stopAndroidPushRegistration, unregisterAndroidPush } from '../lib/native';
 
 interface OpsStore {
   me: User | null;
@@ -40,6 +41,7 @@ export const useOps = create<OpsStore>((set, getState) => ({
         get<ShiftState>('/api/state'),
       ]);
       set({ me: user, meta, airport, state, loading: false, error: null });
+      registerAndroidPush();
       realtime.onStatus(online => set({ online }));
       realtime.on(packet => getState().handle(packet));
       realtime.start();
@@ -120,5 +122,5 @@ export const act = {
   shiftEnd: () => post('/api/engineer/shift/end'),
   reset: () => post('/api/reset'),
   routePreview: (from: string, to: string) => post('/api/routes/preview', { from, to, blocked_edges: [] }),
-  logout: async () => { try { await post('/api/auth/logout'); } finally { realtime.stop(); location.replace('/login'); } },
+  logout: async () => { stopAndroidPushRegistration(); try { await unregisterAndroidPush(); await post('/api/auth/logout'); } finally { realtime.stop(); location.replace('/login'); } },
 };

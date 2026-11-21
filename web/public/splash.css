@@ -12,7 +12,7 @@ body { overflow:hidden; color:#f4f6f8; font:13px/1.5 system-ui,-apple-system,"Se
 .flight-signal::before { width:6px; height:6px; border-radius:50%; background:#48c9d6; content:""; }
 .flight-frame { width:min(520px,100%); padding:0; border:0; background:transparent; }
 .flight-brand { display:flex; align-items:center; gap:12px; }
-.flight-brand-mark { width:34px; height:34px; color:#48c9d6; }
+.flight-brand-mark { width:34px; height:34px; object-fit:contain; border-radius:8px; }
 .flight-brand-title { color:#f4f6f8; font-size:12px; font-weight:700; letter-spacing:.11em; }
 .flight-brand-subtitle { margin-top:3px; color:#aab5c2; font:9px var(--mono); letter-spacing:.12em; }
 .flight-route { display:none; }

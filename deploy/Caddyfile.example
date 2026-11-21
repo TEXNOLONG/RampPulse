@@ -1,5 +1,0 @@
-# Replace with a domain whose DNS A record points to the VPS IPv4.
-# Caddy obtains and renews a public HTTPS certificate automatically.
-rampulse.example.org {
-	reverse_proxy 127.0.0.1:8000
-}

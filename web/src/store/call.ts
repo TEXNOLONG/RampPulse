@@ -1,9 +1,19 @@
 import { create } from 'zustand';
+import { Room, RoomEvent, Track } from 'livekit-client';
 import { get, post, errorText } from '../lib/api';
 import { realtime } from '../lib/realtime';
 import type { RealtimePacket } from '../lib/types';
-import { prefs } from './prefs';
 import { toast } from '../components/ui';
+import {
+  androidCallEnded,
+  connectAndroidLiveKit,
+  connectDesktopLiveKit,
+  disconnectDesktopLiveKit,
+  preferredCallTransport,
+  setAndroidCallMuted,
+  setDesktopCallMuted,
+  type CallTransport,
+} from '../lib/native';
 
 export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active' | 'ended';
 
@@ -15,7 +25,6 @@ interface CallStore {
   muted: boolean;
   startedAt: number;
   reason: string;
-  /** 0..1 levels for the voice wave */
   localLevel: number;
   remoteLevel: number;
   quality: 'good' | 'poor' | 'unknown';
@@ -28,55 +37,62 @@ interface CallStore {
   init(): void;
 }
 
-let pc: RTCPeerConnection | null = null;
-let localStream: MediaStream | null = null;
-let remoteAudio: HTMLAudioElement | null = null;
-let pendingOffer: string | null = null;
-let iceBuffer: RTCIceCandidateInit[] = [];
+interface LiveKitCredentials { url: string; token: string; room: string }
+interface NativeCallEvent extends CustomEvent<{ type: string; message?: string }> {}
+
+let room: Room | null = null;
 let ring: { stop(): void } | null = null;
 let noAnswerTimer = 0;
-let failTimer = 0;
-let meterFrame = 0;
-let audioCtx: AudioContext | null = null;
-let iceConfig: RTCIceServer[] | null = null;
+let pendingPoll = 0;
 let initialized = false;
-
+let nativeTransport: CallTransport = 'browser';
+let credentials: LiveKitCredentials | null = null;
+let intentionalDisconnect = false;
 const signal = (peerId: number, payload: Record<string, unknown>) =>
   post('/api/calls/relay', { recipient_id: peerId, signal: payload });
 
 export const useCall = create<CallStore>((set, getState) => ({
-  phase: 'idle',
-  callId: '',
-  peerId: null,
-  peerName: '',
-  muted: false,
-  startedAt: 0,
-  reason: '',
-  localLevel: 0,
-  remoteLevel: 0,
-  quality: 'unknown',
+  phase: 'idle', callId: '', peerId: null, peerName: '', muted: false, startedAt: 0,
+  reason: '', localLevel: 0, remoteLevel: 0, quality: 'unknown',
 
   init() {
     if (initialized) return;
     initialized = true;
     realtime.on(packet => getState().handle(packet));
+    const restore = () => { void restorePendingCalls(getState().handle); };
+    window.addEventListener('focus', restore);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') restore(); });
+    window.addEventListener('rampulse-native-call', (event: Event) => {
+      const detail = (event as NativeCallEvent).detail;
+      if (detail?.type === 'ended' && !intentionalDisconnect) getState().hangup('Связь завершена');
+      if (detail?.type === 'error') getState().hangup(detail.message || 'Ошибка нативного аудиосоединения');
+    });
     window.addEventListener('beforeunload', () => {
       const { phase, peerId, callId } = getState();
       if (phase !== 'idle' && phase !== 'ended' && peerId) navigator.sendBeacon?.('/api/calls/relay', new Blob([JSON.stringify({ recipient_id: peerId, signal: { type: 'hangup', call_id: callId } })], { type: 'application/json' }));
     });
+    restore();
   },
 
   async start(peerId, peerName) {
     if (getState().phase !== 'idle' && getState().phase !== 'ended') return;
-    const callId = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    const callId = crypto.randomUUID?.() ?? 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+    nativeTransport = preferredCallTransport();
+    if (nativeTransport === 'unsupported') {
+      toast.bad('В этом APK не найден нативный аудиомодуль. Установите свежую Android-сборку RampPulse.', 'Звонки недоступны');
+      return;
+    }
+    if (nativeTransport === 'browser' && (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia)) {
+      toast.bad('В этом браузере нет WebRTC. Используйте приложение RampPulse с нативной голосовой связью.', 'Звонки недоступны');
+      return;
+    }
     set({ phase: 'outgoing', callId, peerId, peerName, muted: false, reason: '', startedAt: 0, quality: 'unknown' });
     try {
-      localStream = await getMicrophone();
-      pc = await createPeer(peerId, callId);
-      localStream.getTracks().forEach(t => pc!.addTrack(t, localStream!));
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-      await signal(peerId, { type: 'invite', call_id: callId, sdp: offer.sdp });
+      credentials = await post<LiveKitCredentials>('/api/calls/livekit-token', { call_id: callId });
+      await signal(peerId, { type: 'invite', call_id: callId, transport: 'livekit' });
       ring = tone('outgoing');
       noAnswerTimer = window.setTimeout(() => getState().hangup('Абонент не ответил'), 45000);
     } catch (error) {
@@ -89,22 +105,19 @@ export const useCall = create<CallStore>((set, getState) => ({
 
   async accept() {
     const { peerId, callId } = getState();
-    if (getState().phase !== 'incoming' || !peerId || !pendingOffer) return;
+    if (getState().phase !== 'incoming' || !peerId) return;
     ring?.stop(); ring = null;
+    clearTimeout(noAnswerTimer);
     set({ phase: 'connecting' });
     try {
-      localStream = await getMicrophone();
-      pc = await createPeer(peerId, callId);
-      localStream.getTracks().forEach(t => pc!.addTrack(t, localStream!));
-      await pc.setRemoteDescription({ type: 'offer', sdp: pendingOffer });
-      pendingOffer = null;
-      await flushIce();
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await signal(peerId, { type: 'answer', call_id: callId, sdp: answer.sdp });
+      nativeTransport = preferredCallTransport();
+      if (nativeTransport === 'unsupported') throw new Error('В APK не найден нативный аудиомодуль. Установите свежую Android-сборку RampPulse.');
+      credentials = await post<LiveKitCredentials>('/api/calls/livekit-token', { call_id: callId });
+      await connectMedia(credentials);
+      await signal(peerId, { type: 'answer', call_id: callId, transport: 'livekit' });
     } catch (error) {
+      getState().hangup(errorText(error) || 'Не удалось подключиться к голосовой комнате');
       toast.bad(errorText(error), 'Не удалось ответить');
-      getState().hangup('Ошибка соединения');
     }
   },
 
@@ -127,7 +140,10 @@ export const useCall = create<CallStore>((set, getState) => ({
 
   toggleMute() {
     const muted = !getState().muted;
-    localStream?.getAudioTracks().forEach(t => { t.enabled = !muted; });
+    if (nativeTransport === 'android-native') setAndroidCallMuted(muted);
+    else if (nativeTransport === 'tauri-native') void setDesktopCallMuted(muted).catch(error => toast.bad(errorText(error)));
+    else if (nativeTransport === 'unsupported') toast.bad('Нативный аудиомодуль не установлен');
+    else void room?.localParticipant.setMicrophoneEnabled(!muted).catch(() => toast.bad('Не удалось изменить микрофон'));
     set({ muted });
   },
 
@@ -140,30 +156,26 @@ export const useCall = create<CallStore>((set, getState) => ({
 
     if (kind === 'ring') {
       if (state.phase !== 'idle' && state.phase !== 'ended') {
-        signal(p.from_user_id, { type: 'busy', call_id: p.call_id }).catch(() => {});
+        signal(Number(p.from_user_id), { type: 'busy', call_id: p.call_id }).catch(() => {});
         return;
       }
-      pendingOffer = p.sdp || null;
-      iceBuffer = [];
-      set({ phase: 'incoming', callId: p.call_id, peerId: p.from_user_id, peerName: p.from_name || 'Собеседник', muted: false, reason: '', startedAt: 0, quality: 'unknown' });
+      nativeTransport = preferredCallTransport();
+      credentials = null;
+      set({ phase: 'incoming', callId: String(p.call_id || ''), peerId: Number(p.from_user_id), peerName: String(p.from_name || 'Собеседник'), muted: false, reason: '', startedAt: 0, quality: 'unknown' });
       ring = tone('incoming');
       noAnswerTimer = window.setTimeout(() => { if (getState().phase === 'incoming') { cleanup(); set({ phase: 'ended', reason: 'Пропущенный вызов' }); endLater(set); } }, 45000);
       if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
-        try { new Notification('Входящий вызов', { body: p.from_name || 'RampPulse', tag: 'call' }); } catch { /* ignore */ }
+        try { new Notification('Входящий вызов', { body: String(p.from_name || 'RampPulse'), tag: 'call' }); } catch { /* native push handles background */ }
       }
       return;
     }
     if (!sameCall) return;
-    if (kind === 'answer' && p.sdp && pc && state.phase === 'outgoing') {
+    if (kind === 'answer' && state.phase === 'outgoing') {
       ring?.stop(); ring = null;
       clearTimeout(noAnswerTimer);
       set({ phase: 'connecting' });
-      pc.setRemoteDescription({ type: 'answer', sdp: p.sdp }).then(flushIce).catch(() => getState().hangup('Ошибка соединения'));
-      return;
-    }
-    if (kind === 'ice' && p.candidate) {
-      if (pc?.remoteDescription) pc.addIceCandidate(p.candidate).catch(() => {});
-      else iceBuffer.push(p.candidate);
+      if (!credentials) { getState().hangup('Истёк токен голосовой связи'); return; }
+      void connectMedia(credentials).catch(error => getState().hangup(errorText(error)));
       return;
     }
     if (kind === 'decline' || kind === 'busy') {
@@ -180,130 +192,106 @@ export const useCall = create<CallStore>((set, getState) => ({
   },
 }));
 
-async function getMicrophone(): Promise<MediaStream> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error(window.isSecureContext ? 'Микрофон недоступен на этом устройстве' : 'Для микрофона нужно защищённое подключение (HTTPS)');
+async function connectMedia(auth: LiveKitCredentials) {
+  if (nativeTransport === 'android-native') {
+    // Android starts the microphone foreground service only after RECORD_AUDIO
+    // permission is granted, inside its native LiveKit bridge. Starting it here
+    // first can crash Android 14+ with a foreground-service security exception.
+    await connectAndroidLiveKit(auth.url, auth.token);
+    markActive();
+    return;
   }
-  const p = prefs.get();
-  const ideal: MediaTrackConstraints = {
-    echoCancellation: true,
-    noiseSuppression: p.noiseSuppression,
-    autoGainControl: true,
-    ...(p.micDeviceId ? { deviceId: { ideal: p.micDeviceId } } : {}),
-  };
-  try {
-    return await navigator.mediaDevices.getUserMedia({ audio: ideal, video: false });
-  } catch (error: any) {
-    if (error?.name === 'NotAllowedError') throw new Error('Доступ к микрофону запрещён. Разрешите его в настройках системы');
-    if (error?.name === 'NotFoundError') throw new Error('Микрофон не найден. Подключите устройство или выберите его в настройках');
-    // OverconstrainedError / TypeError on picky WebKit builds: retry with the simplest request.
-    return navigator.mediaDevices.getUserMedia({ audio: true });
+  if (nativeTransport === 'tauri-native') {
+    await connectDesktopLiveKit(auth.url, auth.token);
+    markActive();
+    return;
   }
+  if (nativeTransport === 'unsupported') throw new Error('Нативный аудиомодуль не установлен. Обновите приложение RampPulse.');
+  if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error('В этом браузере отключена поддержка WebRTC. Используйте RampPulse с нативной голосовой связью.');
+  }
+  const liveRoom = new Room({ adaptiveStream: false, dynacast: false });
+  room = liveRoom;
+  intentionalDisconnect = false;
+  liveRoom.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
+    if (track.kind !== Track.Kind.Audio) return;
+    const element = track.attach() as HTMLMediaElement;
+    element.autoplay = true;
+    element.setAttribute('playsinline', '');
+    element.dataset.rampulseParticipant = participant.identity;
+    element.style.display = 'none';
+    document.body.appendChild(element);
+    void element.play().catch(() => toast.info('Нажмите в окне, чтобы включить звук', 'Звук'));
+  });
+  liveRoom.on(RoomEvent.TrackUnsubscribed, track => track.detach().forEach(element => element.remove()));
+  liveRoom.on(RoomEvent.Disconnected, () => {
+    if (!intentionalDisconnect && useCall.getState().phase !== 'ended' && useCall.getState().phase !== 'idle') useCall.getState().hangup('Связь с голосовым сервером потеряна');
+  });
+  await liveRoom.connect(auth.url, auth.token, { autoSubscribe: true });
+  const published = await liveRoom.localParticipant.setMicrophoneEnabled(true);
+  if (!published) throw new Error('Не удалось включить микрофон');
+  markActive();
 }
 
-async function createPeer(peerId: number, callId: string) {
-  if (!iceConfig) {
-    try { iceConfig = (await get<{ ice_servers: RTCIceServer[] }>('/api/calls/config')).ice_servers; }
-    catch { iceConfig = [{ urls: 'stun:stun.l.google.com:19302' }]; }
-    setTimeout(() => { iceConfig = null; }, 10 * 60 * 1000); // TURN credentials are short-lived
-  }
-  const peer = new RTCPeerConnection({ iceServers: iceConfig });
-  peer.onicecandidate = e => {
-    if (e.candidate) signal(peerId, { type: 'ice', call_id: callId, candidate: e.candidate.toJSON() }).catch(() => {});
-  };
-  peer.ontrack = e => {
-    remoteAudio ??= Object.assign(document.createElement('audio'), { autoplay: true });
-    (remoteAudio as any).playsInline = true;
-    remoteAudio.srcObject = e.streams[0] ?? new MediaStream([e.track]);
-    const sink = prefs.get().speakerDeviceId;
-    if (sink && (remoteAudio as any).setSinkId) (remoteAudio as any).setSinkId(sink).catch(() => {});
-    remoteAudio.play().catch(() => toast.info('Нажмите в любом месте окна, чтобы включить звук', 'Звук'));
-    startMeters(e.streams[0] ?? new MediaStream([e.track]));
-  };
-  peer.onconnectionstatechange = () => {
-    const s = peer.connectionState;
-    if (s === 'connected') {
-      clearTimeout(failTimer);
-      const st = useCall.getState();
-      useCall.setState({ phase: 'active', startedAt: st.startedAt || Date.now(), quality: 'good' });
-    } else if (s === 'disconnected') {
-      useCall.setState({ quality: 'poor' });
-      clearTimeout(failTimer);
-      failTimer = window.setTimeout(() => peer.connectionState !== 'connected' && useCall.getState().hangup('Связь потеряна'), 12000);
-    } else if (s === 'failed') {
-      useCall.getState().hangup('Не удалось установить соединение. Проверьте сеть или TURN-сервер');
-    }
-  };
-  return peer;
-}
-
-async function flushIce() {
-  const buffered = iceBuffer; iceBuffer = [];
-  for (const c of buffered) await pc?.addIceCandidate(c).catch(() => {});
-}
-
-function startMeters(remote: MediaStream) {
-  try {
-    audioCtx ??= new AudioContext();
-    const make = (stream: MediaStream) => {
-      const a = audioCtx!.createAnalyser(); a.fftSize = 256;
-      audioCtx!.createMediaStreamSource(stream).connect(a);
-      return a;
-    };
-    const ra = make(remote);
-    const la = localStream ? make(localStream) : null;
-    const buf = new Uint8Array(128);
-    const level = (a: AnalyserNode) => { a.getByteTimeDomainData(buf); let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128)); return Math.min(1, peak / 64); };
-    let last = 0;
-    const loop = (t: number) => {
-      if (t - last > 70) {
-        last = t;
-        useCall.setState({ remoteLevel: level(ra), localLevel: la && !useCall.getState().muted ? level(la) : 0 });
-      }
-      meterFrame = requestAnimationFrame(loop);
-    };
-    meterFrame = requestAnimationFrame(loop);
-  } catch { /* metering optional */ }
+function markActive() {
+  const current = useCall.getState();
+  if (current.phase === 'ended' || current.phase === 'idle') return;
+  useCall.setState({ phase: 'active', startedAt: current.startedAt || Date.now(), quality: 'good' });
 }
 
 function cleanup() {
+  intentionalDisconnect = true;
+  if (nativeTransport === 'android-native') androidCallEnded();
+  else if (nativeTransport === 'tauri-native') void disconnectDesktopLiveKit().catch(() => {});
   ring?.stop(); ring = null;
-  clearTimeout(noAnswerTimer); clearTimeout(failTimer);
-  cancelAnimationFrame(meterFrame);
-  pc?.getSenders().forEach(s => s.track?.stop());
-  pc?.close(); pc = null;
-  localStream?.getTracks().forEach(t => t.stop()); localStream = null;
-  if (remoteAudio) { remoteAudio.srcObject = null; }
-  pendingOffer = null; iceBuffer = [];
+  clearTimeout(noAnswerTimer);
+  if (room) {
+    const current = room;
+    room = null;
+    current.removeAllListeners();
+    current.disconnect();
+  }
+  credentials = null;
   useCall.setState({ localLevel: 0, remoteLevel: 0 });
 }
 
-function endLater(set: (p: Partial<CallStore>) => void) {
-  setTimeout(() => { if (useCall.getState().phase === 'ended') set({ phase: 'idle', peerId: null, callId: '' }); }, 2200);
+async function restorePendingCalls(handle: (packet: RealtimePacket) => void) {
+  if (pendingPoll || (useCall.getState().phase !== 'idle' && useCall.getState().phase !== 'ended')) return;
+  pendingPoll = window.setTimeout(() => { pendingPoll = 0; }, 3000);
+  try {
+    const result = await get<{ invites?: Record<string, unknown>[] }>('/api/calls/pending');
+    if (useCall.getState().phase !== 'idle' && useCall.getState().phase !== 'ended') return;
+    const invite = result.invites?.[0];
+    if (invite) handle({ protocol: 1, event_id: `push-${Date.now()}`, sequence: 0, occurred_at_ms: Date.now(), kind: 'call_invited', actor: null, entity: null, payload: invite } as RealtimePacket);
+  } catch { /* offline; next focus or app resume retries */ }
 }
 
-/** Generated ringtones (no audio files). */
+function endLater(set: (p: Partial<CallStore>) => void) {
+  setTimeout(() => { if (useCall.getState().phase === 'ended') set({ phase: 'idle', peerId: null, callId: '', peerName: '' }); }, 2200);
+}
+
 function tone(kind: 'incoming' | 'outgoing') {
   let stopped = false;
   let timer = 0;
+  let context: AudioContext | null = null;
   try {
-    audioCtx ??= new AudioContext();
-    const ctx = audioCtx;
+    context = new AudioContext();
+    const ctx = context;
     const beep = () => {
       if (stopped) return;
       const t = ctx.currentTime;
       const freqs = kind === 'incoming' ? [660, 880] : [440];
       freqs.forEach((f, i) => {
-        const o = ctx.createOscillator(), g = ctx.createGain();
-        o.type = 'sine'; o.frequency.value = f;
+        const oscillator = ctx.createOscillator(), gain = ctx.createGain();
+        oscillator.type = 'sine'; oscillator.frequency.value = f;
         const at = t + i * 0.18;
-        g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(kind === 'incoming' ? 0.18 : 0.08, at + 0.03);
-        g.gain.exponentialRampToValueAtTime(0.0001, at + (kind === 'incoming' ? 0.5 : 1.0));
-        o.connect(g).connect(ctx.destination); o.start(at); o.stop(at + 1.1);
+        gain.gain.setValueAtTime(0.0001, at); gain.gain.exponentialRampToValueAtTime(kind === 'incoming' ? 0.14 : 0.07, at + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + (kind === 'incoming' ? 0.5 : 1));
+        oscillator.connect(gain).connect(ctx.destination); oscillator.start(at); oscillator.stop(at + 1.1);
       });
       timer = window.setTimeout(beep, kind === 'incoming' ? 1600 : 3000);
     };
     beep();
-  } catch { /* autoplay policy */ }
-  return { stop() { stopped = true; clearTimeout(timer); } };
+  } catch { /* notification sound is optional */ }
+  return { stop() { stopped = true; clearTimeout(timer); void context?.close().catch(() => {}); } };
 }
