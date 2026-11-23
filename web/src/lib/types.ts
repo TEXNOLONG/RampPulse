@@ -82,6 +82,11 @@ export interface Technician {
   y: number;
 }
 
+export interface EngineerLocation {
+  tech_id: number; user_id: number; name: string; latitude: number; longitude: number;
+  accuracy: number; heading: number | null; speed: number | null; updated_at_ms: number; track: Point[];
+}
+
 export interface Aircraft {
   id: number;
   flight: string;
@@ -166,6 +171,8 @@ export interface AirportEdge { id: string; a: string; b: string; length: number;
 export interface Airport {
   name: string;
   source?: string;
+  geo?: { iata?: string; icao?: string; latitude: number; longitude: number; elevation_m?: number; coordinate_source?: string };
+  geo_transform?: { origin_latitude: number; origin_longitude: number; meters_per_degree_latitude: number; meters_per_degree_longitude: number };
   width: number;
   height: number;
   nodes: AirportNode[];
@@ -179,6 +186,7 @@ export interface Airport {
 
 export interface Meta {
   airport: { name: string; source?: string };
+  maps?: { provider: string; configured: boolean };
   bases: { id: string; name: string }[];
   quals: string[];
   types: string[];

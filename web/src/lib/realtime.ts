@@ -1,4 +1,6 @@
 import type { RealtimePacket } from './types';
+import { getServerUrl } from './api';
+import { desktop } from './desktop';
 
 type Listener = (packet: RealtimePacket) => void;
 type StatusListener = (online: boolean) => void;
@@ -59,8 +61,12 @@ class Realtime {
   }
 
   private open() {
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${scheme}://${location.host}/ws`);
+    const configured = getServerUrl();
+    const endpoint = new URL(configured || location.origin);
+    const scheme = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    const token = desktop.clientAccessToken();
+    const protocols = token ? [`rp-auth.${token}`] : undefined;
+    const ws = new WebSocket(`${scheme}//${endpoint.host}/ws`, protocols);
     this.ws = ws;
     ws.onopen = () => {
       this.retry = 0;

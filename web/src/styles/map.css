@@ -1,5 +1,5 @@
 .map-stage{position:absolute;inset:0;overflow:hidden;background-color:#08080A;background-image:
-  radial-gradient(70% 60% at 55% 50%,rgba(99,102,241,.06),transparent 70%),
+  radial-gradient(70% 60% at 55% 50%,rgba(0,0,0,.06),transparent 70%),
   linear-gradient(rgba(255,255,255,.026) 1px,transparent 1px),
   linear-gradient(90deg,rgba(255,255,255,.026) 1px,transparent 1px);
   background-size:100% 100%,52px 52px,52px 52px}
@@ -16,7 +16,7 @@
 .map-svg .rwy{fill:none;stroke:#17171C;stroke-linecap:butt}
 .map-svg .rwy-mark{fill:none;stroke:rgba(255,255,255,.26);stroke-width:3;stroke-dasharray:30 26}
 .map-svg .taxi-base{fill:none;stroke:#18181E;stroke-width:22;stroke-linecap:round;stroke-linejoin:round}
-.map-svg .taxi-glow{fill:none;stroke:rgba(129,140,248,.2);stroke-width:1.6;stroke-linecap:round}
+.map-svg .taxi-glow{fill:none;stroke:rgba(255,255,255,.2);stroke-width:1.6;stroke-linecap:round}
 .map-svg .blocked-edge{stroke:var(--red);stroke-width:14;stroke-linecap:round;stroke-dasharray:16 12;opacity:.95;filter:drop-shadow(0 0 6px rgba(239,68,68,.7))}
 .map-svg .area-label{fill:rgba(255,255,255,.12);font:700 24px var(--font);letter-spacing:.24em;text-anchor:middle;text-transform:uppercase;pointer-events:none}
 .map-svg .rwy-label{fill:rgba(255,255,255,.2);font:600 24px var(--mono);letter-spacing:.1em;text-anchor:middle;pointer-events:none}
@@ -36,7 +36,7 @@
 .map-svg .stand.em .slot{stroke:var(--red);fill:var(--red-soft);animation:em-blink 1.2s ease-in-out infinite}
 .map-svg .stand.em .stand-label{fill:var(--red-2)}
 @keyframes em-blink{50%{fill:rgba(239,68,68,.35)}}
-.map-svg .stand.sel .slot{stroke:var(--accent-3);stroke-width:2;fill:rgba(99,102,241,.3)}
+.map-svg .stand.sel .slot{stroke:var(--accent-3);stroke-width:2;fill:rgba(0,0,0,.3)}
 .map-svg .stand.sel .stand-label{fill:#fff}
 .map-svg.zoom-wide .stand-label,.map-svg.zoom-wide .base-label{display:none}
 .map-svg.zoom-wide .stand .mk,.map-svg.zoom-wide .base .mk{transform:scale(calc(var(--mk,1) * .6))}
@@ -47,9 +47,9 @@
 
 .map-svg .aircraft{cursor:pointer}
 .map-svg .aircraft .plane{fill:#E4E4E7;stroke:#09090B;stroke-width:1.2;transition:fill .2s}
-.map-svg .aircraft.inbound .plane{fill:#93C5FD}
+.map-svg .aircraft.inbound .plane{fill:#A1A1AA}
 .map-svg .aircraft.departing .plane{fill:#FCD34D}
-.map-svg .aircraft.sel .plane{fill:#fff;filter:drop-shadow(0 0 7px rgba(129,140,248,.95))}
+.map-svg .aircraft.sel .plane{fill:#fff;filter:drop-shadow(0 0 7px rgba(255,255,255,.95))}
 
 .map-svg .tech{cursor:pointer;transition:opacity .4s var(--ease)}
 .map-svg .tech .tech-body{fill:#0E0E11;stroke:var(--q,#A1A1AA);stroke-width:2.2}
@@ -67,12 +67,12 @@
 .map-svg .tech.in-zone .tech-pulse{fill:var(--green);opacity:.3}
 .map-svg .tech.out-zone{opacity:.28}
 
-.map-svg .route-casing{fill:none;stroke:rgba(99,102,241,.25);stroke-width:calc(var(--mk,1) * 12px);stroke-linecap:round;stroke-linejoin:round}
+.map-svg .route-casing{fill:none;stroke:rgba(0,0,0,.25);stroke-width:calc(var(--mk,1) * 12px);stroke-linecap:round;stroke-linejoin:round}
 .map-svg .route{fill:none;stroke:var(--accent-3);stroke-width:calc(var(--mk,1) * 3.5px);stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:calc(var(--mk,1) * 10px) calc(var(--mk,1) * 8px);animation:dash 1s linear infinite}
 @keyframes dash{to{stroke-dashoffset:calc(var(--mk,1) * -18px)}}
 .map-svg .route-muted{fill:none;stroke:rgba(255,255,255,.16);stroke-width:calc(var(--mk,1) * 2px);stroke-dasharray:calc(var(--mk,1) * 3px) calc(var(--mk,1) * 6px);stroke-linecap:round}
 .map-svg.no-routes .route-muted{display:none}
-.map-svg .ac-route{fill:none;stroke:rgba(147,197,253,.3);stroke-width:calc(var(--mk,1) * 2px);stroke-dasharray:calc(var(--mk,1) * 2px) calc(var(--mk,1) * 8px);stroke-linecap:round}
+.map-svg .ac-route{fill:none;stroke:rgba(255,255,255,.3);stroke-width:calc(var(--mk,1) * 2px);stroke-dasharray:calc(var(--mk,1) * 2px) calc(var(--mk,1) * 8px);stroke-linecap:round}
 
 .map-svg .iso-fill{fill:rgba(16,185,129,.045)}
 .map-svg .iso-ring{fill:none;stroke:rgba(52,211,153,.75);stroke-width:calc(var(--mk,1) * 1.6px);stroke-dasharray:calc(var(--mk,1) * 8px) calc(var(--mk,1) * 6px);animation:iso-breathe 3s ease-in-out infinite}

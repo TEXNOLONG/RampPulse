@@ -12,6 +12,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::{
     fs,
+    io::Write,
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -44,6 +45,7 @@ struct NativeCallSession {
     _audio: PlatformAudio,
 }
 struct AirportFile(PathBuf);
+struct DiagnosticLog(PathBuf);
 #[cfg(not(target_os = "android"))]
 struct ChatDatabase(PathBuf);
 
@@ -57,7 +59,7 @@ type SqlCallback =
     unsafe extern "C" fn(*mut c_void, c_int, *mut *mut c_char, *mut *mut c_char) -> c_int;
 
 #[cfg(not(target_os = "android"))]
-#[link(name = "sqlite3")]
+#[link(name = "sqlite3", kind = "static")]
 extern "C" {
     fn sqlite3_open(filename: *const c_char, db: *mut *mut Sqlite3) -> c_int;
     fn sqlite3_close(db: *mut Sqlite3) -> c_int;
@@ -613,12 +615,15 @@ fn configured_server_url() -> Option<String> {
     }
 }
 
-fn is_trusted_microphone_origin(url: &Url, remote_origin: Option<&str>) -> bool {
+fn is_trusted_app_origin(url: &Url, remote_origin: Option<&str>) -> bool {
     let local_app = url.scheme() == "http"
         && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
+    let tauri_app = matches!(url.as_str(), "http://tauri.localhost/" | "https://tauri.localhost/" | "tauri://localhost/")
+        || matches!(url.host_str(), Some("tauri.localhost"))
+            && matches!(url.scheme(), "http" | "https");
     let trusted_remote = remote_origin
         .is_some_and(|origin| url.origin().ascii_serialization() == origin);
-    local_app || trusted_remote
+    local_app || tauri_app || trusted_remote
 }
 
 fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String> {
@@ -711,6 +716,37 @@ fn consume_desktop_startup(state: State<'_, DesktopLaunchState>) -> bool {
     state.0.swap(false, Ordering::SeqCst)
 }
 
+fn append_diagnostic(path: &Path, message: &str) -> Result<(), String> {
+    if fs::metadata(path).map(|metadata| metadata.len() > 512 * 1024).unwrap_or(false) {
+        fs::write(path, "RampPulse diagnostic log rotated\n").map_err(|error| error.to_string())?;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let clean: String = message
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .take(1600)
+        .collect();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    writeln!(file, "{timestamp} {clean}").map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_client_diagnostic(message: String, log: State<'_, DiagnosticLog>) -> Result<(), String> {
+    append_diagnostic(&log.0, &message)
+}
+
+#[tauri::command]
+fn read_client_diagnostics(log: State<'_, DiagnosticLog>) -> Result<String, String> {
+    fs::read_to_string(&log.0).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn realtime_protocol_version() -> u16 {
     ramppulse_core::REALTIME_PROTOCOL_VERSION
@@ -767,6 +803,8 @@ pub fn run() {
             consume_desktop_startup,
             realtime_protocol_version,
             load_airport_data,
+            write_client_diagnostic,
+            read_client_diagnostics,
             #[cfg(not(target_os = "android"))]
             chat_initialize,
             #[cfg(not(target_os = "android"))]
@@ -794,17 +832,23 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "android")]
             let root = PathBuf::new();
-            #[cfg(not(target_os = "android"))]
+            #[cfg(all(not(target_os = "android"), not(feature = "client-only")))]
             let root = project_root(app).map_err(std::io::Error::other)?;
+            #[cfg(any(target_os = "android", feature = "client-only"))]
+            let root = PathBuf::new();
             app.manage(AirportFile(
                 root.join("data").join("airport_sheremetyevo.json"),
             ));
             let data_dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
             std::fs::create_dir_all(&data_dir)?;
+            let diagnostic_path = data_dir.join("diagnostics.log");
+            app.manage(DiagnosticLog(diagnostic_path.clone()));
+            let _ = append_diagnostic(&diagnostic_path, "application setup started");
             let db_path = data_dir.join("dispatch.db");
             #[cfg(not(target_os = "android"))]
+            app.manage(NativeCallState(Mutex::new(None)));
+            #[cfg(all(not(target_os = "android"), not(feature = "client-only")))]
             {
-                app.manage(NativeCallState(Mutex::new(None)));
                 let chat_database = ChatDatabase(data_dir.join("chat.sqlite"));
                 chat_database.connect().map_err(std::io::Error::other)?;
                 app.manage(chat_database);
@@ -834,7 +878,7 @@ pub fn run() {
             app.manage(DesktopLaunchState(AtomicBool::new(true)));
             let profile = data_dir
                 .join("webview-profiles")
-                .join(format!("main-{}", std::process::id()));
+                .join("main");
             std::fs::create_dir_all(&profile)?;
             let splash_config = app
                 .config()
@@ -846,20 +890,36 @@ pub fn run() {
             let window = WebviewWindowBuilder::from_config(app, splash_config)
                 .map_err(std::io::Error::other)?
                 .on_permission_request(move |webview, kind| {
-                    if kind != PermissionKind::Microphone {
-                        return PermissionResponse::Default;
-                    }
-                    let allowed = webview.url().ok().is_some_and(|url| {
-                        is_trusted_microphone_origin(&url, trusted_remote_origin.as_deref())
+                    let trusted = webview.url().ok().is_some_and(|url| {
+                        is_trusted_app_origin(&url, trusted_remote_origin.as_deref())
                     });
-                    if allowed {
-                        PermissionResponse::Allow
-                    } else {
-                        PermissionResponse::Deny
+                    match kind {
+                        PermissionKind::Geolocation if trusted => PermissionResponse::Default,
+                        PermissionKind::Geolocation => PermissionResponse::Deny,
+                        PermissionKind::Microphone if trusted => PermissionResponse::Allow,
+                        PermissionKind::Microphone => PermissionResponse::Deny,
+                        _ => PermissionResponse::Default,
                     }
                 })
                 .data_directory(profile)
                 .build()?;
+            let actual_url = window.url().map(|url| url.to_string()).unwrap_or_else(|_| "unknown".into());
+            let _ = append_diagnostic(&diagnostic_path, &format!("main window created url={actual_url}"));
+
+            #[cfg(feature = "client-only")]
+            {
+                let _ = append_diagnostic(&diagnostic_path, "client-only build: skipping local backend startup");
+                // Client-only releases must always leave the native splash and load the UI.
+                // Some existing installations may retain the base config's splash URL.
+                if actual_url.ends_with("/splash.html") || actual_url.ends_with("splash.html") {
+                    let ui_url = Url::parse("http://tauri.localhost/index.html")
+                        .map_err(std::io::Error::other)?;
+                    window.navigate(ui_url).map_err(std::io::Error::other)?;
+                    let _ = append_diagnostic(&diagnostic_path, "client-only splash detected; navigating to application UI");
+                }
+                let _ = window.set_resizable(true);
+                return Ok(());
+            }
 
             if let Some(remote_base) = remote_base {
                 // Android's initial WebView URL is set to the VPS by the generated
@@ -992,16 +1052,15 @@ fn open_secondary_session(
     .resizable(true)
     .maximized(true)
     .on_permission_request(move |webview, kind| {
-        if kind != PermissionKind::Microphone {
-            return PermissionResponse::Default;
-        }
-        let allowed = webview.url().ok().is_some_and(|url| {
-            is_trusted_microphone_origin(&url, trusted_remote_origin.as_deref())
+        let trusted = webview.url().ok().is_some_and(|url| {
+            is_trusted_app_origin(&url, trusted_remote_origin.as_deref())
         });
-        if allowed {
-            PermissionResponse::Allow
-        } else {
-            PermissionResponse::Deny
+        match kind {
+            PermissionKind::Geolocation if trusted => PermissionResponse::Default,
+            PermissionKind::Geolocation => PermissionResponse::Deny,
+            PermissionKind::Microphone if trusted => PermissionResponse::Allow,
+            PermissionKind::Microphone => PermissionResponse::Deny,
+            _ => PermissionResponse::Default,
         }
     })
     .data_directory(profile)

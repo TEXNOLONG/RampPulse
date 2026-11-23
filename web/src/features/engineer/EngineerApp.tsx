@@ -1,18 +1,21 @@
-import { useEffect, useMemo, useState } from 'react';
+import { apiUrl } from '../../lib/api';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { ClipboardList, Map as MapIcon, MessageCircle, UserRound, Phone, MessageSquare, LifeBuoy, Clock, Check, Play, Flag, MapPin, Plane, Navigation, Power, Wifi, WifiOff, Coffee, Footprints, Car, ListChecks, FileText, ChevronRight, Timer } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { useChat, useUnreadTotal } from '../../store/chat';
 import { useCall } from '../../store/call';
-import { AirportMap } from '../map/AirportMap';
 import { ChatView } from '../chat/ChatView';
 import { SettingsModal } from '../settings/SettingsModal';
 import { Avatar, Button, Modal, toast } from '../../components/ui';
 import { Logo } from '../../components/BootScreen';
 import { cx, mmss, qualColor, simClock } from '../../lib/format';
 import { errorText } from '../../lib/api';
+import { post } from '../../lib/api';
+import { useGps } from '../../lib/gps';
 import type { Request } from '../../lib/types';
 
 type Tab = 'task' | 'map' | 'chat' | 'profile';
+const GeoMap = lazy(() => import('../map/GeoMap').then(module => ({ default: module.GeoMap })));
 const NORM = 900;
 
 const CHECKLISTS: Record<string, string[]> = {
@@ -25,12 +28,44 @@ export function EngineerApp() {
   const state = useOps(s => s.state)!;
   const me = useOps(s => s.me)!;
   const online = useOps(s => s.online);
+  const airport = useOps(s => s.airport)!;
   const unread = useUnreadTotal();
   const [tab, setTab] = useState<Tab>('task');
-  const tech = state.me ?? state.techs.find(t => t.id === me.tech_id) ?? null;
+  const [sharingLocation, setSharingLocation] = useState(false);
+  const [locationShareError, setLocationShareError] = useState<string | null>(null);
+  const gpsStatus = useGps(s => s.status);
+  const gpsFix = useGps(s => s.raw);
   const task = state.active[0] ?? null;
 
   useEffect(() => { useChat.getState().setOpen(tab === 'chat'); }, [tab]);
+  const onShift = state.account?.on_shift ?? me.on_shift;
+  useEffect(() => {
+    if (!sharingLocation || tab !== 'map' || !onShift) {
+      if (sharingLocation) {
+        setSharingLocation(false);
+        void post('/api/engineer/location', { enabled: false }).catch(() => undefined);
+        useGps.getState().stop();
+      }
+      return;
+    }
+    useGps.getState().start();
+    useGps.getState().setFollow(true);
+    let lastSent = 0;
+    const send = () => {
+      const fix = useGps.getState().raw;
+      if (!fix || Date.now() - lastSent < 4_500) return;
+      lastSent = Date.now();
+      void post('/api/engineer/location', { enabled: true, latitude: fix.latitude, longitude: fix.longitude, accuracy: fix.accuracy, heading: fix.heading, speed: fix.speed })
+        .then(() => setLocationShareError(null)).catch(error => setLocationShareError(errorText(error)));
+    };
+    send();
+    const timer = window.setInterval(send, 5_000);
+    return () => {
+      window.clearInterval(timer);
+      void post('/api/engineer/location', { enabled: false }).catch(() => undefined);
+      useGps.getState().stop();
+    };
+  }, [sharingLocation, tab, onShift]);
 
   return (
     <div className="eng">
@@ -44,7 +79,8 @@ export function EngineerApp() {
         {tab === 'task' && <TaskTab task={task} onMap={() => setTab('map')} onChat={() => setTab('chat')} />}
         {tab === 'map' && (
           <div className="eng-map">
-            <AirportMap selection={{ request: task?.id ?? null, tech: tech?.id ?? null, aircraft: null, stand: task?.stand ?? null }} focusTech={tech?.id ?? null} compact />
+            <Suspense fallback={<div className="geo-map-loading glass">Loading map…</div>}><GeoMap airport={airport} simulated={[]} importedAirport panelOpen={false} manageGps={false} /></Suspense>
+            <div className="map-task glass location-share"><MapPin size={16} /><div><b>{sharingLocation ? (locationShareError ? 'Не удалось передать координаты' : gpsFix ? 'Передача геопозиции включена' : `GPS: ${gpsStatus}`) : 'Передача геопозиции выключена'}</b><span>{locationShareError || (onShift ? 'Диспетчер видит ваше местоположение на карте' : 'Начните смену, чтобы делиться местоположением')}</span></div><button disabled={!onShift && !sharingLocation} onClick={() => setSharingLocation(value => !value)}>{sharingLocation ? 'Остановить' : 'Поделиться'}</button></div>
             {task && <div className="map-task glass"><MapPin size={16} /><div><b>{task.stand}</b><span>{task.status === 'enroute' ? `в пути · ${mmss(task.eta_left)}` : task.status_ru}</span></div></div>}
           </div>
         )}
@@ -251,8 +287,8 @@ function ProfileTab() {
   return (
     <div className="eng-scroll">
       <div className="profile-card" style={{ '--pc': me.avatar_color } as React.CSSProperties}>
-        <div className="pp-cover" />
-        <Avatar name={me.name} color={me.avatar_color} size={88} online={online} ring />
+        <div className="pp-cover" style={{ backgroundImage: `linear-gradient(180deg,rgba(10,14,23,.05),rgba(10,14,23,.42)),url("${apiUrl(`/api/profile/media/${me.id}/banner`)}")` }} />
+        <Avatar name={me.name} color={me.avatar_color} src={apiUrl(`/api/profile/media/${me.id}/avatar`)} size={88} online={online} ring />
         <b>{me.name}</b>
         <span>@{me.username}</span>
         {me.bio && <p>{me.bio}</p>}

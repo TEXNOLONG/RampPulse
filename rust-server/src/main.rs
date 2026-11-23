@@ -1,19 +1,23 @@
 mod airport_engine;
+mod aviation;
 mod push;
 mod realtime;
 mod store;
+mod weather;
 
 use axum::RequestExt;
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Path, Query, Request, State,
     },
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use axum::http::Method;
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
@@ -21,7 +25,7 @@ use base64::{
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
@@ -30,9 +34,12 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::task;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use airport_engine::AirportEngine;
+use aviation::AviationService;
+use weather::WeatherService;
 use futures_util::StreamExt;
 use ramppulse_core::{
     ActorRef, AirportGraph, EntityRef, EventKind, RealtimeEvent, REALTIME_PROTOCOL_VERSION,
@@ -65,6 +72,9 @@ struct AppState {
     livekit_api_key: Option<String>,
     livekit_api_secret: Option<String>,
     push: Option<PushService>,
+    aviation: AviationService,
+    weather: WeatherService,
+    engineer_locations: Arc<std::sync::Mutex<std::collections::HashMap<i64, (EngineerLocation, std::time::Instant)>>>,
     login_guard: Arc<std::sync::Mutex<std::collections::HashMap<String, LoginAttempts>>>,
 }
 
@@ -103,6 +113,8 @@ impl IntoResponse for HttpError {
 struct LoginBody {
     email: String,
     password: String,
+    #[serde(default)]
+    native_client: bool,
 }
 
 #[derive(Deserialize)]
@@ -132,6 +144,8 @@ struct CreateRequestBody {
     qual: String,
     #[serde(default)]
     extra: String,
+    #[serde(default)]
+    tech_id: Option<i64>,
     #[serde(default = "default_priority")]
     priority: String,
 }
@@ -197,13 +211,35 @@ struct TechProfileBody {
     #[serde(default)]
     types: Vec<String>,
 }
-
+#[derive(Deserialize)]
+struct EngineerLocationBody {
+    enabled: bool,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    accuracy: Option<f64>,
+    heading: Option<f64>,
+    speed: Option<f64>,
+}
+#[derive(Clone, Serialize)]
+struct EngineerLocation {
+    tech_id: i64,
+    user_id: i64,
+    name: String,
+    latitude: f64,
+    longitude: f64,
+    accuracy: f64,
+    heading: Option<f64>,
+    speed: Option<f64>,
+    updated_at_ms: u64,
+    track: Vec<[f64; 2]>,
+}
 fn default_priority() -> String {
     "normal".into()
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = dotenvy::dotenv();
     let db_path = env::var("DB_FILE").unwrap_or_else(|_| "./ramppulse.db".into());
     let store = AccountStore::open(&db_path)?;
     let demo_mode = env_flag("DEMO_MODE");
@@ -253,6 +289,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         livekit_api_key: env::var("LIVEKIT_API_KEY").ok().filter(|value| !value.is_empty()),
         livekit_api_secret: env::var("LIVEKIT_API_SECRET").ok().filter(|value| !value.is_empty()),
         push: PushService::from_env(),
+        aviation: AviationService::from_env()?,
+        weather: WeatherService::from_env()?,
+        engineer_locations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         login_guard: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
@@ -268,6 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/logout-others", post(logout_others))
         .route("/api/profile", get(profile).post(update_profile))
+        .route("/api/profile/media/{user_id}/{kind}", get(get_profile_media).post(upload_profile_media).delete(delete_profile_media).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/profile/password", post(change_password))
         .route("/api/presence", get(presence))
         .route("/api/push/register", post(register_push_device))
@@ -277,6 +317,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/push/unregister", post(unregister_push_device))
         .route("/api/chat/rooms/{id}/typing", post(chat_typing))
         .route("/api/airport", get(airport))
+        .route("/api/aircraft/live", get(live_aircraft))
+        .route("/api/weather/current", get(current_weather))
+        .route("/api/engineer/location", post(update_engineer_location))
+        .route("/api/engineers/locations", get(engineer_locations))
         .route("/api/state", get(state_snapshot))
         .route("/api/routes/preview", post(route_preview))
         .route("/api/requests", get(list_requests).post(create_request))
@@ -334,6 +378,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ws", get(websocket))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .fallback(get(frontend_asset))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    HeaderValue::from_static("http://tauri.localhost"),
+                    HeaderValue::from_static("https://tauri.localhost"),
+                    HeaderValue::from_static("tauri://localhost"),
+                    HeaderValue::from_static("http://localhost:5173"),
+                    HeaderValue::from_static("http://127.0.0.1:5173"),
+                ]))
+                .allow_credentials(true)
+                .allow_methods(AllowMethods::list([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]))
+                .allow_headers(AllowHeaders::list([
+                    header::ACCEPT,
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    HeaderName::from_static("x-chat-kind"),
+                    HeaderName::from_static("x-chat-duration"),
+                    HeaderName::from_static("x-chat-file-name"),
+                ])),
+        )
         .with_state(state);
 
     tokio::spawn(async move {
@@ -542,7 +606,8 @@ async fn meta(State(state): State<AppState>) -> Json<serde_json::Value> {
         .unwrap_or_else(|| serde_json::json!([]));
     let mut value = serde_json::json!({
         "protocol": ramppulse_core::REALTIME_PROTOCOL_VERSION,
-        "features": { "server_chat": true, "versioned_events": true, "airport_state_v1": true },
+        "features": { "server_chat": true, "versioned_events": true, "airport_state_v1": true, "native_client_token_auth": true, "open_meteo_weather": true, "engineer_live_location": true, "local_geojson_map": true },
+        "maps": { "provider": "LOCAL_GEOJSON", "configured": true, "offline": true },
         "demo": { "enabled": state.demo_mode },
         "airport": { "name": state.airport_name, "source": "SVO / Шереметьево" },
         "quals": ["Планер", "Двигатель", "Авионика"],
@@ -563,7 +628,102 @@ async fn meta(State(state): State<AppState>) -> Json<serde_json::Value> {
 }
 
 async fn airport(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json((*state.airport_data).clone())
+    let mut data = (*state.airport_data).clone();
+    if let Some(object) = data.as_object_mut() {
+        object.entry("geo").or_insert_with(|| json!({
+            "iata": "SVO", "icao": "UUEE", "latitude": 55.97278, "longitude": 37.41472,
+            "elevation_m": 190, "coordinate_source": "Sheremetyevo Airport (SVO/UUEE)"
+        }));
+    }
+    Json(data)
+}
+
+async fn live_aircraft(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WeatherQuery>,
+) -> Result<Json<aviation::LiveAircraftSnapshot>, HttpError> {
+    authenticated_user(&state, &headers).await?;
+    let snapshot = match (query.lat, query.lon) {
+        (Some(lat), Some(lon)) if lat.is_finite() && (-90.0..=90.0).contains(&lat) && lon.is_finite() && (-180.0..=180.0).contains(&lon) => state.aviation.snapshot_at(lat, lon).await,
+        (None, None) => state.aviation.snapshot().await,
+        _ => return Err(HttpError(StatusCode::BAD_REQUEST, "Aircraft coordinates are invalid.")),
+    };
+    Ok(Json(snapshot))
+}
+
+#[derive(Deserialize)]
+struct WeatherQuery {
+    lat: Option<f64>,
+    lon: Option<f64>,
+    refresh: Option<bool>,
+}
+
+async fn current_weather(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WeatherQuery>,
+) -> Result<Json<weather::CurrentWeather>, HttpError> {
+    authenticated_user(&state, &headers).await?;
+    let (lat, lon) = match (query.lat, query.lon) {
+        (Some(lat), Some(lon)) if lat.is_finite() && (-90.0..=90.0).contains(&lat) && lon.is_finite() && (-180.0..=180.0).contains(&lon) => (Some(lat), Some(lon)),
+        (None, None) => (None, None),
+        _ => return Err(HttpError(StatusCode::BAD_REQUEST, "Weather coordinates are invalid.")),
+    };
+    Ok(Json(state.weather.current(lat, lon, query.refresh.unwrap_or(false)).await))
+}
+
+async fn update_engineer_location(
+    State(state): State<AppState>, headers: HeaderMap, Json(body): Json<EngineerLocationBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    if user.role != "engineer" || user.tech_id.is_none() {
+        return Err(HttpError(StatusCode::FORBIDDEN, "Live location sharing is for linked engineer accounts."));
+    }
+    let tech_id = user.tech_id.unwrap();
+    let key = tech_id;
+    if !body.enabled {
+        state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?.remove(&key);
+        state.realtime.publish(EventKind::StateDelta, Audience::Role("dispatcher".into()), Some(ActorRef { user_id: user.id, role: user.role }), Some(EntityRef { kind: "technician_location".into(), id: tech_id.to_string(), version: 1 }), json!({"removed":true,"tech_id":tech_id}));
+        return Ok(Json(json!({"ok":true,"sharing":false})));
+    }
+    if !user.on_shift { return Err(HttpError(StatusCode::CONFLICT, "Start your shift before sharing live location.")); }
+    let (Some(latitude), Some(longitude)) = (body.latitude, body.longitude) else { return Err(HttpError(StatusCode::BAD_REQUEST, "A GPS fix is required to share your location.")); };
+    let accuracy = body.accuracy.unwrap_or(1000.0);
+    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) || !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) || !accuracy.is_finite() || !(0.0..=100_000.0).contains(&accuracy) || body.heading.is_some_and(|v| !v.is_finite()) || body.speed.is_some_and(|v| !v.is_finite()) {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "GPS fix is invalid."));
+    }
+    let mut locations = state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?;
+    let mut track = locations.get(&key).map(|(last, _)| last.track.clone()).unwrap_or_default();
+    if track.last().map_or(true, |last| coordinate_distance_m(*last, [latitude, longitude]) >= 2.0) {
+        track.push([latitude, longitude]);
+        if track.len() > 120 { let excess = track.len() - 120; track.drain(..excess); }
+    }
+    let position = EngineerLocation { tech_id, user_id: user.id, name: user.name.clone(), latitude, longitude, accuracy,
+        heading: body.heading.filter(|v| *v >= 0.0 && *v <= 360.0), speed: body.speed.filter(|v| *v >= 0.0 && *v <= 1000.0),
+        updated_at_ms: (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64, track };
+    locations.insert(key, (position.clone(), std::time::Instant::now()));
+    drop(locations);
+    state.realtime.publish(EventKind::StateDelta, Audience::Role("dispatcher".into()), Some(ActorRef { user_id: user.id, role: user.role }), Some(EntityRef { kind: "technician_location".into(), id: tech_id.to_string(), version: 1 }), serde_json::to_value(&position).unwrap_or(Value::Null));
+    Ok(Json(json!({"ok":true,"sharing":true,"updated_at_ms":position.updated_at_ms})))
+}
+
+fn coordinate_distance_m(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let radians = |value: f64| value.to_radians();
+    let dlat = radians(b[0] - a[0]);
+    let dlon = radians(b[1] - a[1]);
+    let lat1 = radians(a[0]);
+    let lat2 = radians(b[0]);
+    let h = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+    6_371_000.0 * 2.0 * h.sqrt().atan2((1.0 - h).sqrt())
+}
+
+async fn engineer_locations(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<EngineerLocation>>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    require_dispatcher(&user)?;
+    let mut locations = state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?;
+    locations.retain(|_, (_, updated)| updated.elapsed() < std::time::Duration::from_secs(45));
+    Ok(Json(locations.values().map(|(position, _)| position.clone()).collect()))
 }
 
 async fn state_snapshot(
@@ -869,12 +1029,7 @@ async fn reset_simulation(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     require_dispatcher(&user)?;
-    state.engine.reset().map_err(|_| {
-        HttpError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Не удалось сбросить симуляцию",
-        )
-    })?;
+    state.engine.reset().map_err(|_| { HttpError(StatusCode::INTERNAL_SERVER_ERROR, "?? ??????? ???????? ?????????") })?;
     state.realtime.publish(
         EventKind::StateSnapshot,
         Audience::Role("dispatcher".into()),
@@ -987,7 +1142,11 @@ async fn create_request(
         state
             .engine
             .rank_technicians(body.stand.trim(), body.qual.trim(), &engineers);
+    if body.tech_id.is_some_and(|id| !ranked_technicians.iter().any(|(candidate, _)| *candidate == id)) {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Выбранный инженер не на смене, не подходит по квалификации или недоступен по маршруту"));
+    }
     let store = state.store.clone();
+    let requested_tech_id = body.tech_id;
     let request = task::spawn_blocking(move || {
         store.create_request(
             NewRequest {
@@ -998,16 +1157,12 @@ async fn create_request(
                 priority: body.priority,
             },
             &ranked_technicians,
+            requested_tech_id,
         )
     })
     .await
     .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-    .map_err(|_| {
-        HttpError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Не удалось создать заявку",
-        )
-    })?;
+.map_err(|_| if requested_tech_id.is_some() { HttpError(StatusCode::CONFLICT, "Engineer became unavailable; refresh and retry") } else { HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Request creation failed") })?;
     let payload = serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
     state.realtime.publish(
         EventKind::RequestCreated,
@@ -2023,6 +2178,7 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> Result<Response, HttpError> {
+    let native_client = body.native_client;
     let store = state.store.clone();
     let email = body.email.trim().to_lowercase();
     let password = body.password;
@@ -2085,9 +2241,9 @@ async fn login(
             })?;
 
     let max_age = SESSION_TTL_SECONDS;
-    let secure = if state.cookie_secure { "; Secure" } else { "" };
+    let (same_site, secure) = if state.cookie_secure { ("None", "; Secure") } else { ("Lax", "") };
     let cookie =
-        format!("{COOKIE_NAME}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
+        format!("{COOKIE_NAME}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite={same_site}{secure}");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -2099,11 +2255,12 @@ async fn login(
     } else {
         "/"
     };
-    Ok((
-        headers,
-        Json(serde_json::json!({ "user": user, "redirect": redirect })),
-    )
-        .into_response())
+    let response = if native_client {
+        serde_json::json!({ "user": user, "redirect": redirect, "token": token })
+    } else {
+        serde_json::json!({ "user": user, "redirect": redirect })
+    };
+    Ok((headers, Json(response)).into_response())
 }
 
 async fn me(
@@ -2186,8 +2343,8 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
             .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
             .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
     }
-    let secure = if state.cookie_secure { "; Secure" } else { "" };
-    let cookie = format!("{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}");
+    let (same_site, secure) = if state.cookie_secure { ("None", "; Secure") } else { ("Lax", "") };
+    let cookie = format!("{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite={same_site}{secure}");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -2338,11 +2495,20 @@ async fn websocket(
         ));
     }
     let hub = state.realtime.clone();
-    Ok(ws
+    let offered_auth_protocol = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').map(str::trim).find(|protocol| protocol.starts_with("rp-auth.")))
+        .map(str::to_owned);
+    let mut upgrade = ws
         .read_buffer_size(8 * 1024)
         .write_buffer_size(8 * 1024)
         .max_message_size(64 * 1024)
-        .max_frame_size(16 * 1024)
+        .max_frame_size(16 * 1024);
+    if let Some(protocol) = offered_auth_protocol {
+        upgrade = upgrade.protocols([protocol]);
+    }
+    Ok(upgrade
         .on_upgrade(move |socket| websocket_session(socket, user, hub))
         .into_response())
 }
@@ -2355,6 +2521,11 @@ fn origin_is_same_site(headers: &HeaderMap) -> bool {
         // Native clients without browser Origin may authenticate with an explicit bearer token.
         return headers.get(header::AUTHORIZATION).is_some();
     };
+    if matches!(origin,
+        "http://tauri.localhost" | "https://tauri.localhost" | "tauri://localhost"
+        | "http://localhost:5173" | "http://127.0.0.1:5173") {
+        return true;
+    }
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -2485,6 +2656,27 @@ async fn send_event(
 }
 
 fn session_from_headers(headers: &HeaderMap) -> Option<String> {
+    // Prefer the explicit app token over ambient cookies. Embedded webviews can
+    // retain a stale cross-site cookie while the current native session is valid.
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        return Some(token.to_owned());
+    }
+    if let Some(token) = headers
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|protocols| {
+            protocols
+                .split(',')
+                .map(str::trim)
+                .find_map(|protocol| protocol.strip_prefix("rp-auth."))
+        })
+    {
+        return Some(token.to_owned());
+    }
     if let Some(value) = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -2498,11 +2690,7 @@ fn session_from_headers(headers: &HeaderMap) -> Option<String> {
             }
         }
     }
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::to_owned)
+    None
 }
 
 pub(crate) fn hash_password(password: &str, salt: &[u8], iterations: u32) -> String {
@@ -2644,6 +2832,82 @@ async fn update_profile(
         }),
     );
     Ok(Json(serde_json::json!({ "user": updated })))
+}
+
+fn profile_media_dir(state: &AppState) -> PathBuf {
+    state.attachments_dir.join("profile-media")
+}
+
+fn image_extension(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some(("png", "image/png")) }
+    else if bytes.starts_with(b"\xff\xd8\xff") { Some(("jpg", "image/jpeg")) }
+    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some(("gif", "image/gif")) }
+    else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { Some(("webp", "image/webp")) }
+    else { None }
+}
+
+async fn upload_profile_media(
+    State(state): State<AppState>,
+    Path((user_id, kind)): Path<(i64, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let actor = authenticated_user(&state, &headers).await?;
+    if actor.id != user_id { return Err(HttpError(StatusCode::FORBIDDEN, "Можно изменять только собственный профиль")); }
+    if !matches!(kind.as_str(), "avatar" | "banner") || body.is_empty() || body.len() > 5 * 1024 * 1024 {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Изображение должно быть не больше 5 МБ"));
+    }
+    let Some((extension, _)) = image_extension(&body) else {
+        return Err(HttpError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Поддерживаются PNG, JPEG, GIF и WebP"));
+    };
+    let dir = profile_media_dir(&state);
+    let prefix = format!("{user_id}-{kind}.");
+    let url = format!("/api/profile/media/{user_id}/{kind}");
+    task::spawn_blocking(move || {
+        fs::create_dir_all(&dir)?;
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) { let _ = fs::remove_file(entry.path()); }
+        }
+        let destination = dir.join(format!("{user_id}-{kind}.{extension}"));
+        fs::write(destination, &body)
+    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сохранения изображения"))?
+      .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сохранения изображения"))?;
+    Ok(Json(json!({ "url": url })))
+}
+
+async fn delete_profile_media(
+    State(state): State<AppState>,
+    Path((user_id, kind)): Path<(i64, String)>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let actor = authenticated_user(&state, &headers).await?;
+    if actor.id != user_id { return Err(HttpError(StatusCode::FORBIDDEN, "Можно изменять только собственный профиль")); }
+    if !matches!(kind.as_str(), "avatar" | "banner") { return Err(HttpError(StatusCode::BAD_REQUEST, "Неизвестный тип изображения")); }
+    let dir = profile_media_dir(&state);
+    let prefix = format!("{user_id}-{kind}.");
+    task::spawn_blocking(move || {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() { if entry.file_name().to_string_lossy().starts_with(&prefix) { let _ = fs::remove_file(entry.path()); } }
+        }
+    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка удаления изображения"))?;
+    Ok(Json(json!({ "removed": true })))
+}
+
+async fn get_profile_media(
+    State(state): State<AppState>,
+    Path((user_id, kind)): Path<(i64, String)>,
+) -> Result<Response, HttpError> {
+    if user_id <= 0 || !matches!(kind.as_str(), "avatar" | "banner") { return Err(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено")); }
+    let dir = profile_media_dir(&state);
+    let prefix = format!("{user_id}-{kind}.");
+    let file = task::spawn_blocking(move || -> Option<PathBuf> {
+        fs::read_dir(dir).ok()?.flatten().find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)).map(|entry| entry.path())
+    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка чтения изображения"))?
+      .ok_or(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
+    let bytes = tokio::fs::read(file).await.map_err(|_| HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
+    let mime = image_extension(&bytes).map(|(_, mime)| mime).unwrap_or("application/octet-stream");
+    Ok(([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }
 
 async fn change_password(

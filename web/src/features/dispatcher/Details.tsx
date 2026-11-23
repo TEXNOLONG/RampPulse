@@ -1,3 +1,4 @@
+import { apiUrl } from '../../lib/api';
 import { useState } from 'react';
 import { X, Phone, MessageSquare, MapPin, Check, Play, Flag, Ban, Timer, Footprints, Car, PlaneTakeoff, Plus, Move, Save, Wrench } from 'lucide-react';
 import type { Aircraft, Request, Technician } from '../../lib/types';
@@ -62,7 +63,7 @@ export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): v
         <h3>Исполнитель</h3>
         {r.tech_id ? (
           <div className="person-card">
-            <Avatar name={r.tech_name} color={contact?.avatar_color || qualColor(r.qual)} size={44} online={contact ? online : undefined} />
+            <Avatar name={r.tech_name} color={contact?.avatar_color || qualColor(r.qual)} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={44} online={contact ? online : undefined} />
             <div className="person-main" onClick={() => onTech(r.tech_id!)}>
               <b>{r.tech_name}</b>
               <span>{r.travel_mode === 'vehicle' ? <><Car size={13} /> на машине</> : <><Footprints size={13} /> пешком</>} · расчёт {mmss(r.eta)}</span>
@@ -125,7 +126,7 @@ export function TechDetail({ t, onClose, onMove }: { t: Technician; onClose(): v
     <div className="panel-scroll">
       <PanelHead eyebrow="Сотрудник смены" onClose={onClose} title={t.name} sub={<><span className={cx('pill', !t.on_shift ? 'pill-muted' : busy ? 'pill-accent' : 'pill-green')}>{!t.on_shift ? 'не на смене' : busy ? 'на заявке' : 'свободен'}</span>{contact && <span className={cx('pill', online ? 'pill-green' : 'pill-muted')}>{online ? 'в сети' : 'не в сети'}</span>}</>}>
         <div className="profile-hero">
-          <Avatar name={t.name} color={contact?.avatar_color || qualColor(t.qual)} size={64} online={contact ? online : undefined} />
+          <Avatar name={t.name} color={contact?.avatar_color || qualColor(t.qual)} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={64} online={contact ? online : undefined} />
           {contact && <p className="muted">@{contact.username}{contact.bio ? ` · ${contact.bio}` : ''}</p>}
           {contact && <div className="hero-acts"><Button icon={<MessageSquare size={16} />} onClick={() => messageUser(contact.id)}>Написать</Button><Button variant="success" icon={<Phone size={16} />} onClick={() => callUser(contact.id, t.name)}>Позвонить</Button></div>}
         </div>

@@ -4,6 +4,8 @@
  "source": "© участники OpenStreetMap (ODbL)",
  "width": 7598,
  "height": 3225,
+ "geo": {"iata": "SVO", "icao": "UUEE", "latitude": 55.97278, "longitude": 37.41472, "elevation_m": 190, "coordinate_source": "Sheremetyevo Airport (SVO/UUEE)"},
+ "geo_transform": {"origin_latitude": 55.989780562094595, "origin_longitude": 37.326466108921764, "meters_per_degree_latitude": 110540, "meters_per_degree_longitude": 62290.53654129222},
  "runways": [
   {
    "name": "06C/24C",

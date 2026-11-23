@@ -7,7 +7,9 @@ description = "RampPulse VPS service"
 [dependencies]
 axum = { version = "0.8.9", features = ["ws", "json"] }
 base64 = "0.22"
+bytes = "1"
 futures-util = "0.3"
+dotenvy = "0.15"
 hmac = "0.12"
 pbkdf2 = "0.12"
 rand = "0.9"
@@ -20,6 +22,7 @@ sha2 = "0.10"
 sha1 = "0.10"
 subtle = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "fs", "io-util", "sync"] }
+tower-http = { version = "0.6", features = ["cors"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1", features = ["v4"] }
 

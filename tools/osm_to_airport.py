@@ -333,6 +333,14 @@ def build(raw, name, max_stands):
     return {
         "name": name, "schematic": False, "source": "© участники OpenStreetMap (ODbL)",
         "width": round(max(xs) - ox + 150), "height": round(max(ys) - oy + 150),
+        "geo": {"latitude": lat0, "longitude": lon0,
+                "icao": next((e.get("tags", {}).get("icao") for e in raw["elements"]
+                              if e.get("tags", {}).get("aeroway") == "aerodrome" and e.get("tags", {}).get("icao")), None),
+                "iata": next((e.get("tags", {}).get("iata") for e in raw["elements"]
+                              if e.get("tags", {}).get("aeroway") == "aerodrome" and e.get("tags", {}).get("iata")), None),
+                "coordinate_source": "OpenStreetMap airport taxiway nodes"},
+        "geo_transform": {"origin_latitude": lat0 - oy / ky, "origin_longitude": lon0 + ox / kx,
+                          "meters_per_degree_latitude": ky, "meters_per_degree_longitude": kx},
         "runways": runways, "areas": areas, "parking": parking,
         "nodes": [{"id": k, "x": sh(*v)[0], "y": sh(*v)[1]} for k, v in N.items()],
         "edges": E, "stands": stands, "bases": bases,

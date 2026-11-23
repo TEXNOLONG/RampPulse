@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ClipboardList, Plane, Users, ScrollText, MessageSquare, Settings, Pause, Play, Sparkles, ChevronDown, Wifi, WifiOff, LogOut, UserRound, AppWindow, X } from 'lucide-react';
+import { apiUrl } from '../../lib/api';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { ClipboardList, Plane, Users, ScrollText, MessageSquare, Settings, Pause, Play, Sparkles, ChevronDown, Wifi, WifiOff, LogOut, UserRound, AppWindow, X, Globe2, Map } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { useChat, useUnreadTotal } from '../../store/chat';
 import { AirportMap } from '../map/AirportMap';
@@ -18,12 +19,14 @@ import { desktop } from '../../lib/desktop';
 import type { Point, Request } from '../../lib/types';
 
 const SPEEDS = [1, 2, 5, 10, 20, 50];
+const GeoMap = lazy(() => import('../map/GeoMap').then(module => ({ default: module.GeoMap })));
 
 export function DispatcherApp() {
   const state = useOps(s => s.state)!;
   const airport = useOps(s => s.airport)!;
   const me = useOps(s => s.me)!;
   const online = useOps(s => s.online);
+  const engineerLocations = useOps(s => s.engineerLocations);
   const chatOpen = useChat(s => s.open);
   const unread = useUnreadTotal();
   const [tab, setTab] = useState<QueueTab>('requests');
@@ -33,6 +36,7 @@ export function DispatcherApp() {
   const [compare, setCompare] = useState(false);
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [moveTech, setMoveTech] = useState<number | null>(null);
+  const [mapMode, setMapMode] = useState<'ops' | 'geo' | 'it2026'>('ops');
   const [menu, setMenu] = useState<'scenarios' | 'profile' | null>(null);
   const engine = useRef<MapEngine | null>(null);
 
@@ -44,6 +48,11 @@ export function DispatcherApp() {
 
   useEffect(() => { document.body.classList.toggle('panel-open', Boolean(panel || chatOpen)); }, [panel, chatOpen]);
   useEffect(() => { if (sel.request != null && !request) setSel(s => ({ ...s, request: null })); }, [request, sel.request]);
+  useEffect(() => {
+    void useOps.getState().refreshEngineerLocations();
+    const timer = window.setInterval(() => void useOps.getState().refreshEngineerLocations(), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Human vs system: pick the slowest eligible alternative as the "by eye" choice.
   useEffect(() => {
@@ -123,15 +132,18 @@ export function DispatcherApp() {
           <RailBtn on={tab === 'team'} label="Команда" onClick={() => setTab('team')} badge={state.registrations?.length}><Users size={20} /></RailBtn>
           <RailBtn on={tab === 'log'} label="Журнал" onClick={() => setTab('log')}><ScrollText size={20} /></RailBtn>
           <span className="rail-sep" />
+          <RailBtn on={mapMode === 'ops'} label="Схема перрона" onClick={() => { setMapMode('ops'); setMoveTech(null); }}><Map size={20} /></RailBtn>
+          <RailBtn on={mapMode === 'geo'} label="Географическая карта" onClick={() => { setMapMode('geo'); setMoveTech(null); }}><Globe2 size={20} /></RailBtn>
+          <RailBtn on={mapMode === 'it2026'} label="Новая карта · IT2026" onClick={() => { setMapMode('it2026'); setMoveTech(null); }}><Map size={20} /></RailBtn>
           <RailBtn on={chatOpen} label="Связь смены" onClick={() => useChat.getState().setOpen(!chatOpen)} badge={unread}><MessageSquare size={20} /></RailBtn>
         </div>
         <div className="rail-foot">
           <RailBtn label="Настройки" onClick={() => setSettings('appearance')}><Settings size={20} /></RailBtn>
-          <button className="rail-me" onClick={() => setMenu(menu === 'profile' ? null : 'profile')} aria-label="Профиль"><Avatar name={me.name} color={me.avatar_color} size={34} online={online} /></button>
+          <button className="rail-me" onClick={() => setMenu(menu === 'profile' ? null : 'profile')} aria-label="Профиль"><Avatar name={me.name} color={me.avatar_color} src={apiUrl(`/api/profile/media/${me.id}/avatar`)} size={34} online={online} /></button>
         </div>
         {menu === 'profile' && (
           <div className="popover profile-pop glass" onMouseLeave={() => setMenu(null)}>
-            <div className="pop-me"><Avatar name={me.name} color={me.avatar_color} size={44} /><div><b>{me.name}</b><span>@{me.username} · диспетчер</span></div></div>
+            <div className="pop-me"><Avatar name={me.name} color={me.avatar_color} src={apiUrl(`/api/profile/media/${me.id}/avatar`)} size={44} /><div><b>{me.name}</b><span>@{me.username} · диспетчер</span></div></div>
             <button onClick={() => { setMenu(null); setSettings('profile'); }}><UserRound size={16} />Профиль</button>
             <button onClick={() => { setMenu(null); setSettings('appearance'); }}><Settings size={16} />Настройки</button>
             <button onClick={() => { setMenu(null); desktop.openSecondWindow().catch(e => toast.bad(errorText(e))); }}><AppWindow size={16} />Окно второго аккаунта</button>
@@ -146,7 +158,7 @@ export function DispatcherApp() {
         onNewRequest={stand => setNewReq({ open: true, stand })} />
 
       <main className="workspace">
-        <AirportMap selection={{ request: sel.request, tech: sel.tech ?? request?.tech_id ?? null, aircraft: sel.aircraft, stand: request?.stand ?? aircraft?.stand ?? null }}
+        {mapMode !== 'ops' ? <Suspense fallback={<div className="geo-map-loading glass">Loading geographic map…</div>}><GeoMap key={mapMode} airport={airport} simulated={state.aircraft} panelOpen={Boolean(panel || chatOpen)} importedAirport={mapMode === 'it2026'} engineerLocations={engineerLocations} /></Suspense> : <AirportMap selection={{ request: sel.request, tech: sel.tech ?? request?.tech_id ?? null, aircraft: sel.aircraft, stand: request?.stand ?? aircraft?.stand ?? null }}
           comparison={compare ? comparison : null} interactiveEdges onReady={e => { engine.current = e; }}
           onStand={id => {
             if (moveTech != null) return;
@@ -162,8 +174,8 @@ export function DispatcherApp() {
           onEmpty={() => {
             if (moveTech != null) return;
             select({});
-          }} />
-        {moveTech != null && <MoveTechOverlay techId={moveTech} engine={engine.current} onDone={() => setMoveTech(null)} />}
+          }} />}
+        {mapMode === 'ops' && moveTech != null && <MoveTechOverlay techId={moveTech} engine={engine.current} onDone={() => setMoveTech(null)} />}
 
         <header className="cmdbar glass">
           <div className="cmd-title">
@@ -183,6 +195,7 @@ export function DispatcherApp() {
           </div>
           <span className="cmd-spacer" />
           <div className="cmd-controls">
+            <button className={cx('geo-mode-btn', mapMode === 'geo' && 'on')} onClick={() => { setMapMode(mode => mode === 'ops' ? 'geo' : 'ops'); setMoveTech(null); }} title={mapMode === 'ops' ? 'Открыть географическую карту' : 'Вернуться к схеме перрона'} aria-label={mapMode === 'ops' ? 'Географическая карта' : 'Схема перрона'}><Globe2 size={16} /><span>{mapMode === 'ops' ? 'GEO' : 'OPS'}</span></button>
             <div className="sim">
               <select value={state.sim_speed} onChange={e => act.sim({ speed: Number(e.target.value) }).catch(err => toast.bad(errorText(err)))} aria-label="Скорость симуляции">
                 {SPEEDS.map(s => <option key={s} value={s}>×{s}</option>)}

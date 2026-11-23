@@ -788,6 +788,7 @@ impl AccountStore {
         &self,
         new: NewRequest,
         ranked_technicians: &[(i64, f64)],
+        requested_tech_id: Option<i64>,
     ) -> rusqlite::Result<RequestRecord> {
         let now = now_rfc3339();
         let mut connection = self.connection()?;
@@ -812,15 +813,18 @@ impl AccountStore {
         let eta_by_technician: std::collections::HashMap<i64, f64> =
             ranked_technicians.iter().copied().collect();
         let emergency = matches!(new.priority.as_str(), "critical" | "emergency");
-        let assigned = ranked_technicians
-            .iter()
-            .filter(|(_, eta)| emergency || *eta <= 900.0)
-            .find_map(|(tech_id, _)| {
-                eligible
-                    .iter()
-                    .find(|(eligible_id, _)| eligible_id == tech_id)
-                    .cloned()
-            });
+        let assigned = if let Some(requested_id) = requested_tech_id {
+            ranked_technicians.iter().find(|(id, _)| *id == requested_id)
+                .and_then(|_| eligible.iter().find(|(id, _)| *id == requested_id).cloned())
+        } else {
+            ranked_technicians
+                .iter()
+                .filter(|(_, eta)| emergency || *eta <= 900.0)
+                .find_map(|(tech_id, _)| eligible.iter().find(|(eligible_id, _)| eligible_id == tech_id).cloned())
+        };
+        if requested_tech_id.is_some() && assigned.is_none() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let assigned = assigned.filter(|(id, _)| eta_by_technician.contains_key(id));
         let (tech_id, tech_name, status) = match assigned {
             Some((id, name)) => (Some(id), name, "enroute"),

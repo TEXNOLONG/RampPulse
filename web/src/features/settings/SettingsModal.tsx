@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { UserRound, ShieldCheck, Bell, Palette, Headphones, Info, X, Save, KeyRound, LogOut, MonitorSmartphone, Mic, Volume2, Activity, Check } from 'lucide-react';
+import { UserRound, ShieldCheck, Bell, Palette, Headphones, Info, X, Save, KeyRound, LogOut, MonitorSmartphone, Mic, Volume2, Activity, Check, ImagePlus, Trash2 } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { usePrefs } from '../../store/prefs';
 import { Avatar, Button, Field, IconButton, Switch, Segmented, toast } from '../../components/ui';
-import { get, post, errorText } from '../../lib/api';
+import { apiUrl, del, get, post, upload, errorText } from '../../lib/api';
 import { cx, timeHM } from '../../lib/format';
 import type { User } from '../../lib/types';
 import { desktop } from '../../lib/desktop';
@@ -20,7 +20,7 @@ const TABS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
   { id: 'about', label: 'О системе', icon: <Info size={17} /> },
 ];
 
-const COLORS = ['#6366F1', '#8B5CF6', '#EC4899', '#EF4444', '#F59E0B', '#10B981', '#06B6D4', '#3B82F6', '#64748B'];
+const COLORS = ['#000000', '#202024', '#EC4899', '#EF4444', '#F59E0B', '#10B981', '#52525B', '#FFFFFF'];
 
 /** Settings: modal with sidebar on desktop, full-screen page on phones (`page` mode). */
 export function SettingsModal({ tab, onClose, page }: { tab: SettingsTab | null; onClose(): void; page?: boolean }) {
@@ -68,7 +68,7 @@ function MeCard() {
   const online = useOps(s => s.online);
   return (
     <div className="me-card">
-      <Avatar name={me.name} color={me.avatar_color} size={46} online={online} />
+      <Avatar name={me.name} color={me.avatar_color} src={apiUrl(`/api/profile/media/${me.id}/avatar`)} size={46} online={online} />
       <div><b>{me.name}</b><span>@{me.username || '—'} · {me.role === 'dispatcher' ? 'диспетчер' : 'инженер'}</span></div>
     </div>
   );
@@ -80,6 +80,11 @@ function ProfileTab() {
   const [f, setF] = useState({ name: me.name, username: me.username, bio: me.bio, avatar_color: me.avatar_color });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [avatarVersion, setAvatarVersion] = useState(0);
+  const [bannerVersion, setBannerVersion] = useState(0);
+  const [mediaBusy, setMediaBusy] = useState<'avatar' | 'banner' | null>(null);
+  const avatarInput = useRef<HTMLInputElement>(null);
+  const bannerInput = useRef<HTMLInputElement>(null);
   const dirty = f.name !== me.name || f.username !== me.username || f.bio !== me.bio || f.avatar_color !== me.avatar_color;
   async function save() {
     setBusy(true); setErr(null);
@@ -90,14 +95,54 @@ function ProfileTab() {
     } catch (e) { setErr(errorText(e)); }
     finally { setBusy(false); }
   }
+  async function saveImage(kind: 'avatar' | 'banner', file?: File) {
+    if (!file) return;
+    if (!file.type.startsWith('image/') || file.size > 12 * 1024 * 1024) {
+      toast.bad('Выберите изображение размером до 12 МБ');
+      return;
+    }
+    setMediaBusy(kind);
+    try {
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Не удалось обработать изображение')), 'image/jpeg', 0.86));
+      await upload(`/api/profile/media/${me.id}/${kind}`, blob, {});
+      if (kind === 'avatar') setAvatarVersion(Date.now()); else setBannerVersion(Date.now());
+      toast.ok(kind === 'avatar' ? 'Фото профиля сохранено' : 'Баннер профиля сохранён');
+    } catch (e) { toast.bad(errorText(e)); }
+    finally { setMediaBusy(null); }
+  }
+  async function removeImage(kind: 'avatar' | 'banner') {
+    setMediaBusy(kind);
+    try {
+      await del(`/api/profile/media/${me.id}/${kind}`);
+      if (kind === 'avatar') setAvatarVersion(Date.now()); else setBannerVersion(Date.now());
+      toast.ok(kind === 'avatar' ? 'Стандартный аватар восстановлен' : 'Стандартный баннер восстановлен');
+    } catch (e) { toast.bad(errorText(e)); }
+    finally { setMediaBusy(null); }
+  }
   return (
     <div className="stack">
       <div className="profile-preview" style={{ '--pc': f.avatar_color } as React.CSSProperties}>
-        <div className="pp-cover" />
-        <Avatar name={f.name} color={f.avatar_color} size={84} ring />
+        <div className="pp-cover" style={{ backgroundImage: `linear-gradient(180deg,rgba(10,14,23,.05),rgba(10,14,23,.42)),url("${apiUrl(`/api/profile/media/${me.id}/banner?v=${bannerVersion}`)}")` }} />
+        <Avatar name={f.name} color={f.avatar_color} src={apiUrl(`/api/profile/media/${me.id}/avatar?v=${avatarVersion}`)} size={84} ring />
         <b>{f.name || 'Имя'}</b>
         <span>@{f.username || 'login'}</span>
         {f.bio && <p>{f.bio}</p>}
+      </div>
+      <div className="profile-media-actions">
+        <input ref={avatarInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={e => { void saveImage('avatar', e.target.files?.[0]); e.currentTarget.value = ''; }} />
+        <input ref={bannerInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={e => { void saveImage('banner', e.target.files?.[0]); e.currentTarget.value = ''; }} />
+        <Button loading={mediaBusy === 'avatar'} disabled={mediaBusy !== null} icon={<ImagePlus size={16} />} onClick={() => avatarInput.current?.click()}>Загрузить фото</Button>
+        <Button loading={mediaBusy === 'banner'} disabled={mediaBusy !== null} icon={<ImagePlus size={16} />} onClick={() => bannerInput.current?.click()}>Загрузить баннер</Button>
+        <Button disabled={mediaBusy !== null} icon={<Trash2 size={15} />} onClick={() => removeImage('avatar')}>Сбросить фото</Button>
+        <Button disabled={mediaBusy !== null} icon={<Trash2 size={15} />} onClick={() => removeImage('banner')}>Сбросить баннер</Button>
+        <small>PNG, JPEG, WebP или GIF · до 12 МБ. Фото автоматически уменьшается перед отправкой.</small>
       </div>
       <div className="field"><span className="field-label">Цвет профиля</span>
         <div className="swatches">{COLORS.map(c => <button key={c} className={cx('swatch', f.avatar_color.toLowerCase() === c.toLowerCase() && 'on')} style={{ background: c }} onClick={() => setF(v => ({ ...v, avatar_color: c }))} aria-label={c}>{f.avatar_color.toLowerCase() === c.toLowerCase() && <Check size={14} strokeWidth={3} />}</button>)}</div>
@@ -203,8 +248,7 @@ function NotificationsTab() {
 function AppearanceTab() {
   const p = usePrefs();
   const themes = [
-    { value: 'indigo', label: 'Ночная', color: '#7778f7' },
-    { value: 'aviation', label: 'Авиационная', color: '#42a8e8' },
+    { value: 'aviation', label: 'Авиационная', color: '#050505' },
     { value: 'amber', label: 'Янтарная', color: '#e7a43d' },
     { value: 'teal', label: 'Бирюзовая', color: '#36c2ae' },
   ] as const;

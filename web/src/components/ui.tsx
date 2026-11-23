@@ -1,14 +1,16 @@
 import { create } from 'zustand';
-import { useEffect, useRef, type ReactNode, type ButtonHTMLAttributes } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes } from 'react';
 import { X, CheckCircle2, AlertTriangle, Info } from 'lucide-react';
 import { cx, initials } from '../lib/format';
 
 /* ------------------------------------------------------------------ Avatar */
-export function Avatar({ name, color, size = 36, online, ring }: { name?: string | null; color?: string | null; size?: number; online?: boolean; ring?: boolean }) {
-  const c = color && /^#[0-9a-f]{6}$/i.test(color) ? color : '#6366F1';
+export function Avatar({ name, color, size = 36, online, ring, src }: { name?: string | null; color?: string | null; size?: number; online?: boolean; ring?: boolean; src?: string }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  useEffect(() => setImageFailed(false), [src]);
+  const c = color && /^#[0-9a-f]{6}$/i.test(color) ? color : '#000000';
   return (
     <span className={cx('avatar', ring && 'avatar-ring')} style={{ width: size, height: size, fontSize: Math.round(size * 0.38), background: `linear-gradient(140deg, ${c}, ${shade(c, -0.45)})` }}>
-      {initials(name)}
+      {src && !imageFailed ? <img className="avatar-image" src={src} alt="" onError={() => setImageFailed(true)} /> : initials(name)}
       {online != null && <i className={cx('presence', online && 'on')} />}
     </span>
   );

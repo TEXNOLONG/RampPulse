@@ -17,6 +17,8 @@ const permissions = [
   'android.permission.RECORD_AUDIO',
   'android.permission.MODIFY_AUDIO_SETTINGS',
   'android.permission.POST_NOTIFICATIONS',
+  'android.permission.ACCESS_COARSE_LOCATION',
+  'android.permission.ACCESS_FINE_LOCATION',
   'android.permission.USE_FULL_SCREEN_INTENT',
   'android.permission.FOREGROUND_SERVICE',
   'android.permission.FOREGROUND_SERVICE_MICROPHONE',
@@ -99,6 +101,7 @@ class MainActivity : TauriActivity() {
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         callWebView = webView
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
         webView.addJavascriptInterface(RampPulseNativeBridge(this), "RampPulseAndroid")
         ${hasFirebase ? 'FirebaseMessaging.getInstance().token.addOnSuccessListener { RampPulsePushStore.save(this, it) }' : ''}
     }

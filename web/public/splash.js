@@ -24,10 +24,15 @@
   };
 
   const api = window.__TAURI__;
+  const log = message => {
+    try { void api?.core?.invoke?.('write_client_diagnostic', { message: `[native splash] ${message}` }); }
+    catch (error) { console.error('RampPulse splash log failed', error); }
+  };
   const flightVideo = document.querySelector('.flight-video');
   const splash = document.querySelector('.boot-screen.video-only');
   const revealStatus = () => splash?.classList.add('show-status');
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  log(`opened href=${location.href} video=${flightVideo?.currentSrc || flightVideo?.querySelector('source')?.src || 'missing'}`);
   const syncMotionPreference = () => {
     if (!flightVideo) return;
     if (reducedMotion.matches) flightVideo.pause();
@@ -36,7 +41,9 @@
   syncMotionPreference();
   reducedMotion.addEventListener?.('change', syncMotionPreference);
   if (flightVideo) {
+    flightVideo.addEventListener('ended', () => { log('intro video ended'); flightVideo.pause(); }, { once: true });
     flightVideo.addEventListener('error', () => {
+      log(`intro video error code=${flightVideo.error?.code || 'unknown'}`);
       revealStatus();
       setStage(1, 'RADAR & COMMS: Не удалось запустить видео. Проверяем интерфейс…');
     }, { once: true });
@@ -48,9 +55,10 @@
   });
   const listen = api?.event?.listen;
   if (listen) {
-    void listen('service-status', event => setStage(event.payload?.stage, event.payload?.message));
+    void listen('service-status', event => { log(`service status stage=${event.payload?.stage}`); setStage(event.payload?.stage, event.payload?.message); });
     void listen('service-error', event => {
       const message = event.payload?.message || 'Сервис не ответил. Закройте приложение и попробуйте запустить его снова.';
+      log(`service error: ${message}`);
       revealStatus();
       setStage(1, `RADAR & COMMS: ${message}`);
       if (bar) bar.setAttribute('aria-valuenow', '42');

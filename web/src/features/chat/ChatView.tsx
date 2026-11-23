@@ -1,3 +1,4 @@
+import { apiUrl } from '../../lib/api';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Phone, Search, Paperclip, Smile, Mic, SendHorizontal, Check, CheckCheck, Clock3, RotateCw, Hash, FileText, Download, X, Radio } from 'lucide-react';
 import { useChat } from '../../store/chat';
@@ -50,7 +51,7 @@ function RoomRow({ room, contact, online, typing, onClick }: { room: ChatRoom; c
   const shift = room.kind === 'shift';
   return (
     <button className={cx('room', active && 'on')} onClick={onClick}>
-      {shift ? <span className="avatar channel"><Hash size={18} /></span> : <Avatar name={room.peer_name} color={contact?.avatar_color} size={44} online={online} />}
+      {shift ? <span className="avatar channel"><Hash size={18} /></span> : <Avatar name={room.peer_name} color={contact?.avatar_color} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={44} online={online} />}
       <span className="room-main">
         <b>{shift ? room.name : room.peer_name}</b>
         <span>{typing ? <em className="typing-text">печатает…</em> : shift ? 'Общий канал · вся смена' : contact ? `@${contact.username}${contact.qual ? ` · ${contact.qual}` : ''}` : 'Личный диалог'}</span>
@@ -63,7 +64,7 @@ function RoomRow({ room, contact, online, typing, onClick }: { room: ChatRoom; c
 function ContactRow({ c, online, onClick }: { c: ChatContact; online: boolean; onClick(): void }) {
   return (
     <button className="room" onClick={onClick}>
-      <Avatar name={c.name} color={c.avatar_color} size={44} online={online} />
+      <Avatar name={c.name} color={c.avatar_color} src={apiUrl(`/api/profile/media/${c.id}/avatar`)} size={44} online={online} />
       <span className="room-main"><b>{c.name}</b><span>{online ? 'в сети' : c.on_shift ? 'на смене' : 'не на смене'}{c.bio ? ` · ${c.bio}` : ''}</span></span>
     </button>
   );
@@ -108,7 +109,7 @@ function Conversation({ onBack, onClose, closeIcon }: { onBack(): void; onClose?
     <div className="chat">
       <header className="conv-head">
         <IconButton label="Все диалоги" onClick={onBack}><ArrowLeft size={19} /></IconButton>
-        {shift ? <span className="avatar channel sm"><Hash size={16} /></span> : <Avatar name={room.peer_name} color={peer?.avatar_color} size={38} online={peerOnline} />}
+        {shift ? <span className="avatar channel sm"><Hash size={16} /></span> : <Avatar name={room.peer_name} color={peer?.avatar_color} src={peer ? apiUrl(`/api/profile/media/${peer.id}/avatar`) : undefined} size={38} online={peerOnline} />}
         <div className="conv-title"><b>{shift ? room.name : room.peer_name}</b><span className={cx(t && 'typing-text', !t && peerOnline && 't-green')}>{status}</span></div>
         {!shift && peer && <IconButton label="Позвонить" className="call" disabled={callPhase !== 'idle'} onClick={() => useCall.getState().start(peer.id, peer.name)}><Phone size={18} /></IconButton>}
         {shift && <span className="conv-badge"><Radio size={14} />канал</span>}
@@ -116,7 +117,7 @@ function Conversation({ onBack, onClose, closeIcon }: { onBack(): void; onClose?
       </header>
       <div className="messages" ref={scroller} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
         {list.length === 0 && (
-          <div className="chat-empty"><span className="empty-icon">{shift ? <Hash size={22} /> : <Avatar name={room.peer_name} color={peer?.avatar_color} size={56} />}</span><b>{shift ? 'Канал смены' : 'Начните диалог'}</b><p>{shift ? 'Сообщения видят все диспетчеры и инженеры на смене.' : 'Напишите сообщение, отправьте стикер или голосовое.'}</p>
+          <div className="chat-empty"><span className="empty-icon">{shift ? <Hash size={22} /> : <Avatar name={room.peer_name} color={peer?.avatar_color} src={peer ? apiUrl(`/api/profile/media/${peer.id}/avatar`) : undefined} size={56} />}</span><b>{shift ? 'Канал смены' : 'Начните диалог'}</b><p>{shift ? 'Сообщения видят все диспетчеры и инженеры на смене.' : 'Напишите сообщение, отправьте стикер или голосовое.'}</p>
             <div className="quick-stickers">{STICKERS.slice(0, 4).map(s => <button key={s.key} onClick={() => useChat.getState().sendSticker(s.key)}><Sticker id={s.key} size={44} /></button>)}</div>
           </div>
         )}
@@ -142,15 +143,15 @@ function Bubble({ m, own, first, last, showName, onImage }: { m: ChatMessage; ow
   const bare = m.kind === 'sticker';
   return (
     <div className={cx('msg-row', own ? 'own' : 'peer', first && 'first', last && 'last')}>
-      {!own && showName && <span className="msg-avatar">{last && <Avatar name={m.sender_name} color={contact?.avatar_color} size={30} />}</span>}
+      {!own && showName && <span className="msg-avatar">{last && <Avatar name={m.sender_name} color={contact?.avatar_color} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={30} />}</span>}
       <div className={cx('bubble', bare && 'bare', m.kind === 'voice' && 'voice-bubble', m.failed && 'failed')}>
         {!own && showName && first && !bare && <b className="msg-name" style={{ color: contact?.avatar_color || 'var(--accent-2)' }}>{m.sender_name}</b>}
         {m.kind === 'text' && <p>{m.body}{meta}</p>}
         {m.kind === 'sticker' && <><Sticker id={m.sticker || m.content} size={92} />{meta}</>}
-        {m.kind === 'voice' && m.media_url && <><VoicePlayer src={m.media_url} duration={m.duration} own={own} seed={String(m.id) + (m.media_url || '')} />{meta}</>}
-        {m.kind === 'file' && m.media_type?.startsWith('image/') && m.media_url && <><img className="msg-img" src={m.media_url} alt={m.media_name || ''} onClick={() => onImage(m.media_url!)} />{meta}</>}
+        {m.kind === 'voice' && m.media_url && <><VoicePlayer src={apiUrl(m.media_url)} duration={m.duration} own={own} seed={String(m.id) + (m.media_url || '')} />{meta}</>}
+        {m.kind === 'file' && m.media_type?.startsWith('image/') && m.media_url && <><img className="msg-img" src={apiUrl(m.media_url)} alt={m.media_name || ''} onClick={() => onImage(apiUrl(m.media_url!))} />{meta}</>}
         {m.kind === 'file' && !m.media_type?.startsWith('image/') && (
-          <><a className="file" href={m.media_url || '#'} download={m.media_name || 'файл'} target="_blank" rel="noreferrer"><span><FileText size={20} /></span><div><b>{m.media_name || 'Файл'}</b><small>{m.media_type}</small></div><Download size={16} /></a>{meta}</>
+          <><a className="file" href={m.media_url ? apiUrl(m.media_url) : '#'} download={m.media_name || 'файл'}><span><FileText size={20} /></span><div><b>{m.media_name || 'Файл'}</b><small>{m.media_type}</small></div><Download size={16} /></a>{meta}</>
         )}
         {m.failed && <button className="retry" onClick={() => m.localKey && useChat.getState().retry(m.localKey)}><RotateCw size={13} />Не доставлено · повторить</button>}
       </div>

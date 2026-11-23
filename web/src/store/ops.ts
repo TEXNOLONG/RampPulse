@@ -1,8 +1,9 @@
 import { create } from 'zustand';
-import { get, post } from '../lib/api';
+import { errorText, get, post } from '../lib/api';
 import { realtime } from '../lib/realtime';
-import type { Airport, Meta, RealtimePacket, ShiftState, User } from '../lib/types';
+import type { Airport, EngineerLocation, Meta, RealtimePacket, ShiftState, User } from '../lib/types';
 import { registerAndroidPush, stopAndroidPushRegistration, unregisterAndroidPush } from '../lib/native';
+import { desktop } from '../lib/desktop';
 
 interface OpsStore {
   me: User | null;
@@ -12,10 +13,12 @@ interface OpsStore {
   online: boolean;
   /** bumps on every positional update; the map subscribes to it instead of the whole state */
   tick: number;
+  engineerLocations: EngineerLocation[];
   loading: boolean;
   error: string | null;
   boot(): Promise<void>;
   reload(): Promise<void>;
+  refreshEngineerLocations(): Promise<void>;
   setMe(user: User): void;
   handle(packet: RealtimePacket): void;
 }
@@ -29,16 +32,21 @@ export const useOps = create<OpsStore>((set, getState) => ({
   state: null,
   online: false,
   tick: 0,
+  engineerLocations: [],
   loading: true,
   error: null,
 
   async boot() {
+    const startupGet = <T,>(path: string) => get<T>(path).catch(error => {
+      void desktop.log(`Workspace startup GET ${path} failed: ${errorText(error)}`);
+      throw error;
+    });
     try {
       const [{ user }, meta, airport, state] = await Promise.all([
-        get<{ user: User }>('/api/auth/me'),
-        get<Meta>('/api/meta'),
-        get<Airport>('/api/airport'),
-        get<ShiftState>('/api/state'),
+        startupGet<{ user: User }>('/api/auth/me'),
+        startupGet<Meta>('/api/meta'),
+        startupGet<Airport>('/api/airport'),
+        startupGet<ShiftState>('/api/state'),
       ]);
       set({ me: user, meta, airport, state, loading: false, error: null });
       registerAndroidPush();
@@ -46,7 +54,9 @@ export const useOps = create<OpsStore>((set, getState) => ({
       realtime.on(packet => getState().handle(packet));
       realtime.start();
     } catch (error) {
-      set({ loading: false, error: error instanceof Error ? error.message : 'Не удалось загрузить смену' });
+      const message = errorText(error);
+      void desktop.log(`Workspace startup failed: ${message}`);
+      set({ loading: false, error: message || 'Не удалось загрузить смену' });
     }
   },
 
@@ -57,6 +67,13 @@ export const useOps = create<OpsStore>((set, getState) => ({
     } catch { /* keep previous snapshot */ }
   },
 
+  async refreshEngineerLocations() {
+    try {
+      const locations = await get<EngineerLocation[]>('/api/engineers/locations');
+      set({ engineerLocations: locations });
+    } catch { /* dispatcher-only endpoint; keep last known live locations */ }
+  },
+
   setMe(user) {
     set(s => ({ me: user, state: s.state ? { ...s.state, account: user } : s.state }));
   },
@@ -64,6 +81,13 @@ export const useOps = create<OpsStore>((set, getState) => ({
   handle(packet) {
     const kind = packet.kind;
     if (kind === 'heartbeat_ack' || kind.startsWith('chat_') || kind.startsWith('call_') || kind === 'presence_changed') return;
+    if (kind === 'state_delta' && packet.entity?.kind === 'technician_location') {
+      const payload = packet.payload as any;
+      set(s => ({ engineerLocations: payload?.removed
+        ? s.engineerLocations.filter(location => location.tech_id !== Number(payload.tech_id))
+        : [...s.engineerLocations.filter(location => location.tech_id !== Number(payload.tech_id)), payload] }));
+      return;
+    }
     const current = getState().state;
     if (kind === 'state_delta' && packet.entity?.kind === 'simulation' && current) {
       applySimulationDelta(current, packet.payload);
@@ -108,7 +132,7 @@ function applySimulationDelta(state: ShiftState, payload: any) {
 
 export const act = {
   sim: (body: { speed?: number; running?: boolean }) => post('/api/sim', body),
-  createRequest: (body: { stand: string; description: string; qual: string; extra: string; priority: string }) => post('/api/requests', body),
+  createRequest: (body: { stand: string; description: string; qual: string; extra: string; priority: string; tech_id?: number | null }) => post('/api/requests', body),
   dispatcherStep: (id: number, step: 'arrive' | 'start' | 'resolve' | 'cancel') => post(`/api/requests/${id}/${step}`),
   engineerStep: (id: number, step: 'arrive' | 'start' | 'resolve') => post(`/api/engineer/requests/${id}/${step}`),
   blockEdge: (id: string, blocked: boolean) => post(`/api/edges/${id}/block`, { blocked }),
@@ -122,5 +146,5 @@ export const act = {
   shiftEnd: () => post('/api/engineer/shift/end'),
   reset: () => post('/api/reset'),
   routePreview: (from: string, to: string) => post('/api/routes/preview', { from, to, blocked_edges: [] }),
-  logout: async () => { stopAndroidPushRegistration(); try { await unregisterAndroidPush(); await post('/api/auth/logout'); } finally { realtime.stop(); location.replace('/login'); } },
+  logout: async () => { window.dispatchEvent(new Event('ramppulse:logout')); desktop.setClientAuthenticated(false); stopAndroidPushRegistration(); try { await unregisterAndroidPush(); await post('/api/auth/logout'); } finally { desktop.setClientAccessToken(''); realtime.stop(); location.replace('/login'); } },
 };

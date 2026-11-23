@@ -43,8 +43,8 @@ export const plural = (n: number, one: string, few: string, many: string) => {
 export const cx = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' ');
 
 export const QUAL_COLOR: Record<string, string> = {
-  'Планер': '#22D3EE',
+  'Планер': '#A1A1AA',
   'Двигатель': '#F59E0B',
-  'Авионика': '#A78BFA',
+  'Авионика': '#A1A1AA',
 };
 export const qualColor = (q: string | null | undefined) => (q && QUAL_COLOR[q]) || '#A1A1AA';

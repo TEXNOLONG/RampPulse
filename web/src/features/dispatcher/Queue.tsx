@@ -1,3 +1,4 @@
+import { apiUrl } from '../../lib/api';
 import { useMemo, useState } from 'react';
 import { Plus, PlaneLanding, Search, ClipboardList, Plane, Users, ScrollText, UserCheck, UserX, Inbox, MessageSquare, Phone } from 'lucide-react';
 import type { Request, ShiftState, Technician, Aircraft, User } from '../../lib/types';
@@ -131,7 +132,7 @@ function TechRow({ t, selected, onClick }: { t: Technician; selected: boolean; o
   const online = useChat(s => (contact ? s.online.has(contact.id) : false));
   return (
     <div className={cx('trow', selected && 'sel', !t.on_shift && 'off')} onClick={onClick}>
-      <Avatar name={t.name} color={contact?.avatar_color || qualColor(t.qual)} size={36} online={contact ? online : undefined} />
+      <Avatar name={t.name} color={contact?.avatar_color || qualColor(t.qual)} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={36} online={contact ? online : undefined} />
       <div className="trow-main">
         <b>{t.name}</b>
         <span><i className="dot" style={{ background: qualColor(t.qual) }} />{t.qual} · {(t.types || []).join(', ') || 'все типы'}</span>
@@ -154,7 +155,7 @@ function Registration({ u }: { u: User }) {
   const run = (fn: () => Promise<unknown>, ok: string) => { setBusy(true); fn().then(() => toast.ok(ok)).catch(e => toast.bad(errorText(e))).finally(() => setBusy(false)); };
   return (
     <article className="reg">
-      <Avatar name={u.name} color={u.avatar_color} size={38} />
+      <Avatar name={u.name} color={u.avatar_color} src={apiUrl(`/api/profile/media/${u.id}/avatar`)} size={38} />
       <div className="reg-main">
         <b>{u.name} <small>@{u.username}</small></b>
         <span>{u.qual} · {(u.types || []).join(', ') || 'без допусков'}</span>

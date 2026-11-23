@@ -7,6 +7,8 @@ commands.allow = [
   "consume_desktop_startup",
   "realtime_protocol_version",
   "load_airport_data",
+  "write_client_diagnostic",
+  "read_client_diagnostics",
   "chat_initialize",
   "chat_create_dm",
   "chat_load_messages",

@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Eye, EyeOff, ArrowRight, CheckCircle2, ShieldCheck, Radio, Timer, Route, LogIn, UserPlus } from 'lucide-react';
-import { get, post, errorText } from '../../lib/api';
+import { Eye, EyeOff, ArrowRight, CheckCircle2, ShieldCheck, Radio, Timer, Route, LogIn, UserPlus, Server, Wifi, Save } from 'lucide-react';
+import { get, post, errorText, getServerUrl, probeServer, saveServerUrl } from '../../lib/api';
 import type { Meta } from '../../lib/types';
 import { Button, Field, Segmented } from '../../components/ui';
 import { Logo } from '../../components/BootScreen';
 import { cx } from '../../lib/format';
+import { desktop } from '../../lib/desktop';
 
 type Mode = 'login' | 'register' | 'done';
 
@@ -13,8 +14,19 @@ export function AuthPage() {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [lastEmail, setLastEmail] = useState('');
   useEffect(() => {
-    get<Meta>('/api/meta').then(setMeta).catch(() => {});
-    get('/api/auth/me').then(() => location.replace('/')).catch(() => {});
+    const loadMeta = () => get<Meta>('/api/meta').then(setMeta).catch(error => { void desktop.log(`Auth metadata request failed: ${errorText(error)}`); setMeta(null); });
+    window.addEventListener('rampulse-server-changed', loadMeta);
+    // A client-only install without a saved VPS must remain on the server setup/login
+    // screen. Calling relative /api endpoints here can restore a stale local session;
+    // redirecting to '/' then mounts this page again forever.
+    if (desktop.clientOnly && !getServerUrl()) {
+      void desktop.log('Auth bootstrap skipped: no VPS URL configured');
+      return () => window.removeEventListener('rampulse-server-changed', loadMeta);
+    }
+    loadMeta();
+    void desktop.log('Auth page checking existing session');
+    get('/api/auth/me').then(() => { void desktop.log('Auth session restored'); desktop.setClientAuthenticated(true); location.replace('/'); }).catch(error => { void desktop.log(`Auth session check failed: ${errorText(error)}`); desktop.setClientAuthenticated(false); });
+    return () => window.removeEventListener('rampulse-server-changed', loadMeta);
   }, []);
 
   return (
@@ -33,6 +45,7 @@ export function AuthPage() {
         </section>
 
         <section className="auth-card glass">
+          <ServerConnection />
           {mode !== 'done' && (
             <Segmented value={mode} onChange={v => { setMode(v); history.replaceState(null, '', v === 'register' ? '/register' : '/login'); }}
               options={[{ value: 'login', label: <><LogIn size={15} />Вход</> }, { value: 'register', label: <><UserPlus size={15} />Регистрация</> }]} />
@@ -51,6 +64,68 @@ export function AuthPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+function ServerConnection() {
+  const initialUrl = getServerUrl() || (location.protocol === 'https:' ? location.origin : '');
+  const [url, setUrl] = useState(initialUrl);
+  const [status, setStatus] = useState<'unconfigured' | 'checking' | 'connected' | 'error' | 'invalid'> (url ? 'checking' : 'unconfigured');
+  const [message, setMessage] = useState('');
+  const [logCopied, setLogCopied] = useState(false);
+  useEffect(() => {
+    if (!url) return;
+    let active = true;
+    probeServer(url).then(() => { if (active) { setStatus('connected'); setMessage('VPS RampPulse доступен по HTTPS.'); void desktop.log('Saved VPS health check succeeded'); } })
+      .catch(error => { if (active) { const message = errorText(error); setStatus('error'); setMessage(message); void desktop.log(`Saved VPS health check failed: ${message}`); } });
+    return () => { active = false; };
+  }, []);
+
+  async function test() {
+    setStatus('checking'); setMessage('Проверяем HTTPS API…');
+    void desktop.log('VPS API probe started');
+    try {
+      await probeServer(url);
+      const previousUrl = getServerUrl();
+      const savedUrl = saveServerUrl(url);
+      if (previousUrl !== savedUrl) {
+        desktop.setClientAuthenticated(false);
+        desktop.setClientAccessToken('');
+      }
+      setStatus('connected');
+      setMessage('Адрес API проверен и сохранён. Теперь можно войти.');
+      void desktop.log('VPS API probe succeeded and server URL saved');
+    }
+    catch (error) { const text = errorText(error); setStatus(text.startsWith('Введите корректный') || text.startsWith('Укажите HTTPS') ? 'invalid' : 'error'); setMessage(text); void desktop.log(`VPS API probe failed: ${text}`); }
+  }
+
+  function save() {
+    try {
+      const previousUrl = getServerUrl();
+      const savedUrl = saveServerUrl(url);
+      if (previousUrl !== savedUrl) {
+        desktop.setClientAuthenticated(false);
+        desktop.setClientAccessToken('');
+      }
+      setStatus('connected');
+      setMessage('Адрес сохранён. Обновляем подключение…');
+      window.location.reload();
+    } catch (error) { const text = errorText(error); setStatus(text.startsWith('Введите корректный') || text.startsWith('Укажите HTTPS') ? 'invalid' : 'error'); setMessage(text); }
+  }
+
+  return (
+    <section className="server-connect" aria-label="Подключение к VPS">
+      <div className="server-connect-title"><Server size={16} /><b>Сервер RampPulse</b><span className={`server-state ${status}`}>{({ unconfigured: 'Не настроен', checking: 'Проверка…', connected: 'Подключено', error: 'Недоступен', invalid: 'Неверный адрес' })[status]}</span></div>
+      <label className="field"><span className="field-label">API URL</span><input type="url" value={url} onChange={e => { setUrl(e.target.value); setStatus('unconfigured'); setMessage(''); }} placeholder="https://api.example.com" autoCapitalize="none" spellCheck={false} /></label>
+      {message && <p className={status === 'error' ? 'server-connect-error' : 'server-connect-note'} role="status">{message}</p>}
+      <div className="server-connect-actions">
+        <Button size="sm" icon={<Wifi size={15} />} loading={status === 'checking'} onClick={test}>Проверить подключение</Button>
+        <Button size="sm" variant="primary" icon={<Save size={15} />} onClick={save}>Сохранить адрес</Button>
+        {desktop.available && <Button size="sm" onClick={async () => { try { await navigator.clipboard.writeText(await desktop.readDiagnostics()); setLogCopied(true); } catch { setLogCopied(false); } }}>Скопировать лог</Button>}
+      </div>
+      {logCopied && <small role="status">Лог скопирован. Вставьте его в чат, если подключение снова зависнет.</small>}
+      <small>Вход по логину и паролю ниже выполняется на выбранном VPS. Пароль и адрес не вшиваются в сборку.</small>
+    </section>
   );
 }
 
@@ -73,11 +148,33 @@ function LoginForm({ meta, initialEmail, onRegister }: { meta: Meta | null; init
   async function submit(e?: FormEvent, creds?: { login: string; password: string }) {
     e?.preventDefault();
     setBusy(true); setError(null);
+    void desktop.log('Dispatcher login request started');
     try {
-      await post('/api/auth/login', { email: (creds?.login ?? login).trim(), password: creds?.password ?? password });
+      if (desktop.clientOnly) {
+        const serverUrl = getServerUrl();
+        if (!serverUrl) throw new Error('Сначала укажите HTTPS адрес VPS и нажмите «Проверить подключение».');
+        await probeServer(serverUrl);
+      }
+      const result = await post<{ token?: string }>('/api/auth/login', {
+        email: (creds?.login ?? login).trim(),
+        password: creds?.password ?? password,
+        native_client: desktop.clientOnly,
+      });
+      if (!result || typeof result !== 'object') {
+        throw new Error('VPS вернул пустой ответ при входе. Обновите сервер RampPulse и повторите попытку.');
+      }
+      if (desktop.clientOnly && !result.token) {
+        throw new Error('Сервер VPS нужно обновить для входа в Windows-приложение. Сообщите администратору сервера.');
+      }
+      if (result.token) desktop.setClientAccessToken(result.token);
+      void desktop.log('Login accepted by VPS; opening workspace');
+      desktop.setClientAuthenticated(true);
       location.replace('/');
     } catch (err) {
-      setError(errorText(err));
+      const message = errorText(err);
+      void desktop.log(`Login request failed: ${message}`);
+      desktop.setClientAuthenticated(false);
+      setError(message);
       setBusy(false);
     }
   }

@@ -17,14 +17,15 @@ const TEMPLATES = [
 export function NewRequestModal({ open, stand, onClose, onCreated }: { open: boolean; stand?: string; onClose(): void; onCreated(id: number): void }) {
   const airport = useOps(s => s.airport);
   const state = useOps(s => s.state);
-  const [f, setF] = useState({ stand: '', description: '', qual: 'auto', extra: '' });
+  const [f, setF] = useState<{ stand: string; description: string; qual: string; extra: string; tech_id: number | null }>({ stand: '', description: '', qual: 'auto', extra: '', tech_id: null });
   const [em, setEm] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    if (open) setF({ stand: stand || state?.aircraft.find(a => a.status === 'parked')?.stand || airport?.stands[0]?.id || '', description: '', qual: 'auto', extra: '' });
+    if (open) setF({ stand: stand || state?.aircraft.find(a => a.status === 'parked')?.stand || airport?.stands[0]?.id || '', description: '', qual: 'auto', extra: '', tech_id: null });
     if (open) setEm(false);
   }, [open, stand]);
   const aircraft = state?.aircraft.find(a => a.stand === f.stand && a.status === 'parked');
+  const availableTechs = (state?.techs || []).filter(t => t.on_shift && t.status === 'free' && (f.qual === 'auto' || t.qual === f.qual));
 
   async function submit() {
     if (!f.description.trim()) { toast.bad('Опишите неисправность'); return; }
@@ -48,11 +49,17 @@ export function NewRequestModal({ open, stand, onClose, onCreated }: { open: boo
           </select>
         </Field>
         <Field label="Квалификация">
-          <select value={f.qual} onChange={e => setF(v => ({ ...v, qual: e.target.value }))}>
+          <select value={f.qual} onChange={e => setF(v => ({ ...v, qual: e.target.value, tech_id: null }))}>
             <option value="auto">Определить по описанию</option><option>Планер</option><option>Двигатель</option><option>Авионика</option>
           </select>
         </Field>
       </div>
+      <Field label="Инженер" hint="Можно выбрать свободного специалиста на смене или оставить автоматическое назначение">
+        <select value={f.tech_id ?? ''} onChange={e => setF(v => ({ ...v, tech_id: e.target.value ? Number(e.target.value) : null }))}>
+          <option value="">Автоматически по доступности</option>
+          {availableTechs.map(t => <option key={t.id} value={t.id}>{t.name} · {t.qual}</option>)}
+        </select>
+      </Field>
       <Field label="Неисправность">
         <textarea rows={3} value={f.description} onChange={e => setF(v => ({ ...v, description: e.target.value }))} placeholder="Что случилось с бортом?" autoFocus />
       </Field>

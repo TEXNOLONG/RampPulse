@@ -1,3 +1,4 @@
+import { apiUrl } from '../../lib/api';
 import { useEffect, useState } from 'react';
 import { Phone, PhoneOff, Mic, MicOff, Minimize2, Maximize2, SignalHigh, SignalLow } from 'lucide-react';
 import { useCall } from '../../store/call';
@@ -25,7 +26,7 @@ export function CallOverlay() {
   if (mini && c.phase === 'active') {
     return (
       <div className="call-mini glass" onClick={() => setMini(false)}>
-        <Avatar name={c.peerName} color={contact?.avatar_color} size={32} />
+        <Avatar name={c.peerName} color={contact?.avatar_color} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={32} />
         <div><b>{c.peerName}</b><span className="mono">{label}</span></div>
         <Wave level={c.remoteLevel} small />
         <button className="cm-btn" onClick={e => { e.stopPropagation(); c.toggleMute(); }} aria-label="Микрофон">{c.muted ? <MicOff size={16} /> : <Mic size={16} />}</button>
@@ -42,7 +43,7 @@ export function CallOverlay() {
         <div className="call-avatar" style={{ '--lvl': speaking } as React.CSSProperties}>
           {(c.phase === 'outgoing' || c.phase === 'incoming') && <><span className="ring r1" /><span className="ring r2" /><span className="ring r3" /></>}
           <span className="speak" />
-          <Avatar name={c.peerName} color={contact?.avatar_color} size={112} />
+          <Avatar name={c.peerName} color={contact?.avatar_color} src={contact ? apiUrl(`/api/profile/media/${contact.id}/avatar`) : undefined} size={112} />
         </div>
         <h2>{c.peerName}</h2>
         <p className={cx('call-status', c.phase === 'active' && 'mono')}>{label}</p>

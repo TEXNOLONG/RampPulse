@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 export interface Prefs {
-  theme: 'indigo' | 'aviation' | 'amber' | 'teal';
+  theme: 'aviation' | 'amber' | 'teal';
   sound: boolean;
   desktopNotifications: boolean;
   reduceMotion: boolean;
@@ -15,7 +15,7 @@ export interface Prefs {
 
 const KEY = 'ramppulse.prefs.v1';
 const defaults: Prefs = {
-  theme: 'indigo',
+  theme: 'aviation',
   sound: true,
   desktopNotifications: false,
   reduceMotion: false,
@@ -30,7 +30,7 @@ const defaults: Prefs = {
 function load(): Prefs {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
-    const theme = ['indigo', 'aviation', 'amber', 'teal'].includes(saved.theme) ? saved.theme : defaults.theme;
+    const theme = ['aviation', 'amber', 'teal'].includes(saved.theme) ? saved.theme : defaults.theme;
     return { ...defaults, ...saved, theme };
   } catch { return defaults; }
 }
