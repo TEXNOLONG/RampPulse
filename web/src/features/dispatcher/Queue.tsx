@@ -1,5 +1,5 @@
-import { apiUrl } from '../../lib/api';
-import { useMemo, useState } from 'react';
+import { apiUrl, get } from '../../lib/api';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, PlaneLanding, Search, ClipboardList, Plane, Users, ScrollText, UserCheck, UserX, Inbox, MessageSquare, Phone } from 'lucide-react';
 import type { Request, ShiftState, Technician, Aircraft, User } from '../../lib/types';
 import { useOps, act } from '../../store/ops';
@@ -53,7 +53,7 @@ export function Queue({ tab, onTab, selected, onSelectRequest, onSelectTech, onS
           : <Empty icon={<Inbox size={22} />} title={query ? 'Ничего не найдено' : 'Активных заявок нет'} text={query ? undefined : 'Создайте заявку или нажмите на стоянку на карте.'} />)}
         {tab === 'flights' && <Flights state={state} match={match} selected={selected.aircraft} onSelect={onSelectAircraft} />}
         {tab === 'team' && <Team state={state} match={match} selected={selected.tech} onSelect={onSelectTech} />}
-        {tab === 'log' && <Log state={state} />}
+        {tab === 'log' && <Log />}
       </div>
     </aside>
   );
@@ -169,13 +169,41 @@ function Registration({ u }: { u: User }) {
   );
 }
 
-function Log({ state }: { state: ShiftState }) {
-  const events = [...state.events].reverse();
-  return (
-    <div className="log">
-      {events.length ? events.map((e, i) => (
-        <div key={i} className={cx('ev', e.kind)}><time>{timeHM(e.ts) || e.ts}</time><span>{e.text}</span></div>
-      )) : <Empty icon={<ScrollText size={22} />} title="Журнал пуст" text="Здесь появятся события смены." />}
-    </div>
-  );
+function Log() {
+  const [journal, setJournal] = useState<{ columns: string[]; rows: string[][] } | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const refresh = async () => {
+      try {
+        const result = await get<{ columns: string[]; rows: string[][] }>('/api/journal');
+        if (!stopped) { setJournal(result); setError(''); }
+      } catch (e) { if (!stopped) setError(errorText(e)); }
+      if (!stopped) timer = window.setTimeout(refresh, 3000);
+    };
+    void refresh();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, []);
+  const exportCsv = async () => {
+    try {
+      const data = await get<{ columns: string[]; rows: string[][] }>('/api/journal');
+      const escape = (value: string) => '"' + value.replace(/^[=+@-]/, "'$&").replace(/"/g, '""') + '"';
+      const csv = '\uFEFF' + [data.columns, ...data.rows].map(row => row.map(escape).join(';')).join('\r\n');
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+      const link = document.createElement('a');
+      link.href = url; link.download = 'ramppulse-journal-' + Date.now() + '.csv'; link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) { toast.bad(errorText(e)); }
+  };
+  return <div className="journal">
+    <Button onClick={exportCsv}>Выгрузить CSV</Button>
+    {error && <p role="alert">{error}</p>}
+    {!journal && !error && <p>Загрузка журнала…</p>}
+    {journal && <div style={{ overflowX: 'auto' }}><table style={{ fontSize: 12, borderSpacing: 10 }}>
+      <thead><tr>{journal.columns.map(column => <th key={column}>{column}</th>)}</tr></thead>
+      <tbody>{journal.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column} style={{ verticalAlign: 'top', whiteSpace: column === 0 ? 'nowrap' : 'normal', overflowWrap: 'anywhere', minWidth: column === 7 ? 220 : undefined }}>{cell}</td>)}</tr>)}</tbody>
+    </table></div>}
+    {journal?.rows.length === 0 && <p>Событий пока нет.</p>}
+  </div>;
 }

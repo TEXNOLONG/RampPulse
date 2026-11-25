@@ -159,11 +159,21 @@ pub struct Route {
     pub cost: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct Journey {
+    pub nodes: Vec<String>,
+    pub distance_m: f64,
+    pub eta_seconds: f64,
+    pub mode: &'static str,
+}
+
 #[derive(Clone, Debug)]
 pub struct AirportGraph {
     nodes: Vec<GraphNode>,
     index_by_id: HashMap<NodeId, usize>,
     outgoing: Vec<Vec<IndexedEdge>>,
+    road_speeds: HashMap<String, (bool, bool, u8)>,
+    warehouses: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -212,6 +222,8 @@ impl AirportGraph {
             nodes: Vec<AirportNode>,
             #[serde(default)]
             edges: Vec<AirportLink>,
+            #[serde(default)]
+            warehouses: HashSet<String>,
         }
         #[derive(serde::Deserialize)]
         struct AirportNode {
@@ -227,6 +239,13 @@ impl AirportGraph {
             b: String,
             #[serde(default = "default_bidirectional")]
             bidirectional: bool,
+            #[serde(default)]
+            kind: String,
+            vehicle_kmh: Option<u8>,
+            walk_allowed: Option<bool>,
+            vehicle_allowed: Option<bool>,
+            #[serde(default)]
+            blocked: bool,
         }
         fn default_bidirectional() -> bool {
             true
@@ -250,6 +269,7 @@ impl AirportGraph {
             .map(|node| (node.id.as_str(), node.position))
             .collect();
         let mut edges = Vec::with_capacity(document.edges.len());
+        let mut speeds = HashMap::new();
         for (index, link) in document.edges.into_iter().enumerate() {
             let Some(start) = positions.get(link.a.as_str()) else {
                 return Err(GraphError::MissingEndpoint(link.a));
@@ -259,20 +279,23 @@ impl AirportGraph {
             };
             let distance = (end.x - start.x).hypot(end.y - start.y);
             let cost = (distance * 1_000.0).round().max(1.0) as u64;
+            let id = if link.id.is_empty() { format!("edge-{index}") } else { link.id };
+            let speed = link.vehicle_kmh.unwrap_or(match link.kind.as_str() { "stand" | "service_zone" => 5, "terminal" => 8, "apron" => 10, _ => 20 });
+            if !matches!(speed, 5 | 8 | 10 | 20) { return Err(GraphError::InvalidDocument(format!("invalid speed on {id}"))); }
+            speeds.insert(id.clone(), (link.walk_allowed.unwrap_or(link.kind != "runway"), link.vehicle_allowed.unwrap_or(!matches!(link.kind.as_str(), "runway" | "pedestrian")), speed));
             edges.push(GraphEdge {
                 from: link.a,
                 to: link.b,
-                id: if link.id.is_empty() {
-                    format!("edge-{index}")
-                } else {
-                    link.id
-                },
+                id,
                 cost,
-                blocked: false,
+                blocked: link.blocked,
                 bidirectional: link.bidirectional,
             });
         }
-        Self::new(nodes, edges)
+        let mut graph = Self::new(nodes, edges)?;
+        graph.road_speeds = speeds;
+        graph.warehouses = document.warehouses;
+        Ok(graph)
     }
 
     pub fn new(nodes: Vec<GraphNode>, edges: Vec<GraphEdge>) -> Result<Self, GraphError> {
@@ -322,6 +345,8 @@ impl AirportGraph {
             nodes,
             index_by_id,
             outgoing,
+            road_speeds: HashMap::new(),
+            warehouses: HashSet::new(),
         })
     }
 
@@ -329,6 +354,32 @@ impl AirportGraph {
         self.index_by_id.get(id).map(|index| &self.nodes[*index])
     }
 
+    /// Fastest legal walk or vehicle journey through ordered service stops.
+    pub fn journey(&self, start: &str, via: &[String], goal: &str, blocked: &HashSet<String>, vehicle_available: bool) -> Option<Journey> {
+        let mut best = None;
+        for vehicle in [false, true] {
+            if vehicle && !vehicle_available { continue; }
+            let mut nodes = vec![start.to_owned()];
+            let mut from = start;
+            let mut ms = if vehicle { 20_000 } else { 0 };
+            for stop in via.iter().map(String::as_str).chain(std::iter::once(goal)) {
+                let Some(leg) = self.find_path(from, stop, blocked, Some(vehicle)) else { nodes.clear(); break };
+                ms += leg.cost;
+                nodes.extend(leg.nodes.into_iter().skip(1));
+                from = stop;
+            }
+            if nodes.is_empty() { continue; }
+            ms += via.iter().filter(|id| self.warehouses.contains(id.as_str())).count() as u64 * 30_000;
+            let distance_m = nodes.windows(2).map(|pair| {
+                let a = self.node(&pair[0]).unwrap().position;
+                let b = self.node(&pair[1]).unwrap().position;
+                (a.x-b.x).hypot(a.y-b.y)
+            }).sum();
+            let trip = Journey { nodes, distance_m, eta_seconds: ms as f64 / 1000.0, mode: if vehicle { "vehicle" } else { "walk" } };
+            if best.as_ref().is_none_or(|old: &Journey| trip.eta_seconds < old.eta_seconds) { best = Some(trip); }
+        }
+        best
+    }
     /// Dijkstra shortest path over bidirectional airport links. Integer costs and indexed
     /// adjacency keep work bounded and deterministic even when the airport graph grows.
     pub fn shortest_path(
@@ -337,6 +388,10 @@ impl AirportGraph {
         goal: &str,
         blocked_edges: &HashSet<String>,
     ) -> Option<Route> {
+        self.find_path(start, goal, blocked_edges, None)
+    }
+
+    fn find_path(&self, start: &str, goal: &str, blocked_edges: &HashSet<String>, vehicle: Option<bool>) -> Option<Route> {
         let &start_index = self.index_by_id.get(start)?;
         let &goal_index = self.index_by_id.get(goal)?;
         if start_index == goal_index {
@@ -363,7 +418,12 @@ impl AirportGraph {
                 if edge.blocked || blocked_edges.contains(&edge.id) {
                     continue;
                 }
-                let Some(candidate) = cost.checked_add(edge.cost) else {
+                let weight = if let Some(driving) = vehicle {
+                    let (walk, drive, speed) = self.road_speeds.get(&edge.id).copied().unwrap_or((true, true, 20));
+                    if (driving && !drive) || (!driving && !walk) { continue; }
+                    (edge.cost as f64 * 3.6 / if driving { speed as f64 } else { 5.0 }).round().max(1.0) as u64
+                } else { edge.cost };
+                let Some(candidate) = cost.checked_add(weight) else {
                     continue;
                 };
                 if candidate < distance[edge.to] {

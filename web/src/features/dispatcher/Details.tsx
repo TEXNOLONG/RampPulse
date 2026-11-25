@@ -1,4 +1,4 @@
-import { apiUrl } from '../../lib/api';
+import { apiUrl, get } from '../../lib/api';
 import { useState } from 'react';
 import { X, Phone, MessageSquare, MapPin, Check, Play, Flag, Ban, Timer, Footprints, Car, PlaneTakeoff, Plus, Move, Save, Wrench } from 'lucide-react';
 import type { Aircraft, Request, Technician } from '../../lib/types';
@@ -26,10 +26,24 @@ const run = (p: Promise<unknown>, ok?: string) => p.then(() => ok && toast.ok(ok
 
 export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): void; onTech(id: number): void }) {
   const contact = useTechContact(r.tech_id);
+  const engineers = useOps(s => s.state?.techs || []);
+  const [target, setTarget] = useState('');
+  const assign = async () => {
+    if (!target || busy) return;
+    const confirmed = r.status === 'working';
+    if (confirmed && !window.confirm('Подтвердить снятие инженера с начатой работы и назначить выбранного специалиста? Решение будет записано в журнал.')) return;
+    setBusy('assign');
+    try { await act.assignRequest(r.id, Number(target), confirmed); setTarget(''); await useOps.getState().reload(); }
+    catch (e) { toast.bad(errorText(e)); } finally { setBusy(null); }
+  };
   const online = useChat(s => (contact ? s.online.has(contact.id) : false));
   const [busy, setBusy] = useState<string | null>(null);
-  const step = (s: 'arrive' | 'start' | 'resolve' | 'cancel', ok: string) => { setBusy(s); run(act.dispatcherStep(r.id, s), ok).finally(() => setBusy(null)); };
-  const next = { enroute: ['arrive', 'Инженер прибыл', Check], assigned: ['arrive', 'Инженер прибыл', Check], arrived: ['start', 'Начать работу', Play], working: ['resolve', 'Работа выполнена', Flag] }[r.status as string] as [any, string, any] | undefined;
+  const step = (s: 'arrive' | 'start' | 'resolve' | 'cancel', ok: string) => {
+    const confirmShiftLead = s === 'cancel' && r.status === 'working';
+    if (confirmShiftLead && !window.confirm('Подтвердите снятие заявки в работе старшим смены. Решение будет записано в журнал.')) return;
+    setBusy(s); run(act.dispatcherStep(r.id, s, confirmShiftLead), ok).finally(() => setBusy(null));
+  };
+  const next = { enroute: ['arrive', 'Инженер прибыл', Check], arrived: ['start', 'Начать работу', Play], working: ['resolve', 'Работа выполнена', Flag] }[r.status as string] as [any, string, any] | undefined;
   const NextIcon = next?.[2];
   const elapsed = r.arrived_sim != null ? r.arrived_sim - r.created_sim : r.elapsed;
   const pct = Math.min(1, elapsed / NORM);
@@ -73,12 +87,18 @@ export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): v
               <IconButton label="Позвонить инженеру" className="call" disabled={!contact} onClick={() => callUser(contact?.id, r.tech_name || 'Инженер')}><Phone size={18} /></IconButton>
             </div>
           </div>
-        ) : <p className="callout amber">Свободного инженера с допуском «{r.qual}» нет. Заявка в очереди — назначение произойдёт автоматически.</p>}
+        ) : <p className="callout amber">Заявка ожидает назначения диспетчером.</p>}
       </section>
+
+      {!['done','cancelled'].includes(r.status) && <section className="panel-sec">
+        <label>Выберите специалиста<select value={target} onChange={e => setTarget(e.target.value)}><option value="">Инженер с допуском</option>{r.status === 'waiting' ? candidates.map(c => <option key={c.tech_id} value={c.tech_id}>{c.name} · {mmss(c.eta)}</option>) : engineers.filter(t => t.on_shift && t.status === 'free' && t.qual === r.qual && t.id !== r.tech_id).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
+        <Button disabled={!target || Boolean(busy) || (r.status === 'waiting' && !candidates.some(candidate => String(candidate.tech_id) === target))} onClick={assign}>{r.tech_id ? 'Переназначить' : 'Назначить'}</Button>
+        {r.status === 'waiting' && candidates.length === 0 && <p className="muted">Нет свободных инженеров с нужным допуском и доступным маршрутом.</p>}
+      </section>}
 
       {candidates.length > 0 && (
         <section className="panel-sec">
-          <h3>Почему выбран этот инженер</h3>
+          <h3>{r.status === 'waiting' ? 'Свободные инженеры по времени прибытия' : 'Маршрут назначенного инженера'}</h3>
           <div className="cands">
             {candidates.map(c => {
               const pick = c.tech_id === r.tech_id;
@@ -105,9 +125,18 @@ export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): v
         </ol>
       </section>
 
+      <Button onClick={async () => {
+        try {
+          const {columns, rows} = await get<{columns:string[];rows:string[][]}>('/api/journal');
+          const quote = (value:string) => '"' + (/^[=+@\-\t\r]/.test(value) ? "'" : '') + value.replaceAll('"','""') + '"';
+          const csv = [columns,...rows].map(row => row.map(quote).join(';')).join('\r\n');
+          const url = URL.createObjectURL(new Blob(['\ufeff',csv], {type:'text/csv;charset=utf-8'}));
+          const link = document.createElement('a'); link.href=url; link.download='ramppulse-journal.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch(e) { toast.bad(errorText(e)); }
+      }}>Скачать журнал смены (CSV)</Button>
       <footer className="panel-actions">
         {next && <Button variant="primary" size="lg" icon={NextIcon ? <NextIcon size={18} /> : undefined} loading={busy === next[0]} onClick={() => step(next[0], 'Статус обновлён')}>{next[1]}</Button>}
-        <Button variant="danger" size="lg" icon={<Ban size={17} />} loading={busy === 'cancel'} onClick={() => step('cancel', 'Заявка отменена')}>Отменить</Button>
+        {!['done','cancelled'].includes(r.status) && <Button variant="danger" size="lg" icon={<Ban size={17} />} loading={busy === 'cancel'} onClick={() => step('cancel', 'Заявка отменена')}>Отменить</Button>}
       </footer>
     </div>
   );
@@ -142,7 +171,8 @@ export function TechDetail({ t, onClose, onMove }: { t: Technician; onClose(): v
       </section>
       <section className="panel-sec">
         <h3>Профиль допуска (симуляция)</h3>
-        <div className="seg-row">{['Планер', 'Двигатель', 'Авионика'].map(q => <button key={q} disabled={busy} className={cx('chip', qual === q && 'on')} onClick={() => setQual(q)}>{q}</button>)}</div>
+        <input aria-label="Квалификация" maxLength={100} list="tech-quals" value={qual} disabled={busy} onChange={e => setQual(e.target.value)} />
+        <datalist id="tech-quals">{useOps.getState().meta?.quals.map(q => <option key={q} value={q} />)}</datalist>
         <div className="chips">{AIRCRAFT_TYPES.map(x => <button key={x} disabled={busy} className={cx('chip', types.includes(x) && 'on')} onClick={() => setTypes(v => v.includes(x) ? v.filter(y => y !== x) : [...v, x])}>{x}</button>)}</div>
         <div className="row-2">
           <Button icon={<Save size={16} />} disabled={busy} onClick={() => run(act.techProfile(t.id, qual, types), 'Профиль обновлён')}>Сохранить</Button>

@@ -7,13 +7,18 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::store::{PublicUser, RequestRecord};
 
+const SIM_AIRCRAFT_SPEED_MPS: f64 = 1.0;
+
 #[derive(Clone)]
 pub struct AirportEngine {
     airport_name: String,
+    terminal: MapPoint,
+    vehicle_engineers: HashSet<i64>,
     graph: Arc<AirportGraph>,
     nodes: Arc<HashMap<String, MapPoint>>,
     edge_ids: Arc<HashSet<String>>,
     stands: Arc<Vec<Stand>>,
+    arrival_nodes: Arc<Vec<String>>,
     bases: Arc<HashMap<String, Base>>,
     state: Arc<RwLock<EngineState>>,
 }
@@ -24,6 +29,8 @@ struct Stand {
     node: String,
     #[serde(default)]
     heading: f64,
+    registration: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -92,6 +99,7 @@ struct EngineState {
     sim_time: f64,
     sim_speed: f64,
     sim_running: bool,
+    terminal_spawn: bool,
     aircraft: Vec<Aircraft>,
     base_techs: Vec<Tech>,
     blocked: HashSet<String>,
@@ -103,6 +111,8 @@ struct EngineState {
 }
 
 struct TechRoute {
+    via: Vec<String>,
+    mode: &'static str,
     request_id: i64,
     goal_node: String,
     points: Vec<MapPoint>,
@@ -139,6 +149,10 @@ impl AirportEngine {
         let stands: Vec<Stand> =
             serde_json::from_value(airport.get("stands").cloned().unwrap_or_else(|| json!([])))
                 .map_err(|error| format!("не удалось загрузить стоянки: {error}"))?;
+        let arrival_nodes: Vec<String> = serde_json::from_value(
+            airport.get("arrival_nodes").cloned().unwrap_or_else(|| json!([])),
+        )
+        .map_err(|error| format!("не удалось загрузить точки захода: {error}"))?;
         let base_list: Vec<Base> =
             serde_json::from_value(airport.get("bases").cloned().unwrap_or_else(|| json!([])))
                 .map_err(|error| format!("не удалось загрузить базы инженеров: {error}"))?;
@@ -188,8 +202,9 @@ impl AirportEngine {
 
         let mut state = EngineState {
             sim_time: 0.0,
-            sim_speed: 10.0,
-            sim_running: true,
+            sim_speed: 1.0,
+            sim_running: false,
+            terminal_spawn: false,
             aircraft: Vec::new(),
             base_techs,
             blocked: HashSet::new(),
@@ -199,18 +214,36 @@ impl AirportEngine {
             tech_profiles: HashMap::new(),
             next_aircraft_id: 1,
         };
-        for stand in stands.iter().take(4) {
-            let aircraft = build_aircraft(state.next_aircraft_id, stand, &nodes, &airport_name);
+        for (index, stand) in stands.iter().enumerate() {
+            let mut aircraft = build_aircraft(state.next_aircraft_id, stand, &nodes, &airport_name);
+            if index < 2 && stand.registration.is_none() {
+                set_arrival_route(&mut aircraft, &stand.node, index, &arrival_nodes, &graph, &nodes, &state.blocked);
+            }
             state.aircraft.push(aircraft);
             state.next_aircraft_id += 1;
         }
 
         Ok(Self {
             airport_name,
+            terminal: {
+                let p = airport["areas"].as_array().and_then(|a| a.iter().find(|a| a["kind"] == "terminal"))
+                    .and_then(|a| a["points"].as_array()).and_then(|p| p.first());
+                let x = p.and_then(|p| p[0].as_f64()).unwrap_or(0.0);
+                let y = p.and_then(|p| p[1].as_f64()).unwrap_or(0.0);
+                nodes.values().min_by(|a,b| ((a.x-x).hypot(a.y-y)).total_cmp(&((b.x-x).hypot(b.y-y)))).copied().unwrap_or(MapPoint{x,y})
+            },
+            vehicle_engineers: serde_json::from_value(
+                airport
+                    .get("vehicle_engineers")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .map_err(|e| e.to_string())?,
             graph: Arc::new(graph),
-            nodes: Arc::new(nodes),
+            nodes: Arc::new(nodes.clone()),
             edge_ids: Arc::new(edge_ids),
             stands: Arc::new(stands),
+            arrival_nodes: Arc::new(arrival_nodes),
             bases: Arc::new(bases),
             state: Arc::new(RwLock::new(state)),
         })
@@ -237,6 +270,7 @@ impl AirportEngine {
                     x: 400.0,
                     y: 1060.0,
                 });
+            let position = if state.terminal_spawn { self.terminal } else { position };
             state.tech_positions.entry(tech_id).or_insert(position);
             let index = if let Some(index) = techs.iter().position(|tech| tech.id == tech_id) {
                 index
@@ -279,6 +313,10 @@ impl AirportEngine {
             }
         }
 
+        let busy: HashSet<i64> = requests.iter()
+            .filter(|request| !matches!(request.status.as_str(), "done" | "cancelled"))
+            .filter_map(|request| request.tech_id)
+            .collect();
         let mut active = Vec::new();
         let mut history = Vec::new();
         let mut waiting = 0;
@@ -301,6 +339,19 @@ impl AirportEngine {
             } else {
                 value["aircraft_id"] = Value::Null;
                 value["flight"] = Value::Null;
+            }
+            if request.status == "waiting" && current_user.is_some_and(|user| user.role == "dispatcher") {
+                let started = std::time::Instant::now();
+                value["candidates"] = json!(self.rank_technicians(request, users, &busy, &state).into_iter().map(|(_, _, candidate)| candidate).collect::<Vec<_>>());
+                value["rejected_candidates"] = json!(users.iter().filter(|user| user.role == "engineer")
+                    .filter(|user| !value["candidates"].as_array().unwrap().iter().any(|candidate| candidate["tech_id"].as_i64() == user.tech_id))
+                    .map(|user| json!({"tech_id":user.tech_id,"name":user.name,"reason":
+                        if user.status != "active" { "account_inactive" }
+                        else if !user.on_shift { "off_shift" }
+                        else if user.qual.as_deref() != Some(request.qual.as_str()) { "qualification_mismatch" }
+                        else if user.tech_id.is_some_and(|id| busy.contains(&id)) { "busy" }
+                        else { "no_accessible_route_or_origin" }})).collect::<Vec<_>>());
+                value["candidate_generation_ms"] = json!(started.elapsed().as_secs_f64() * 1000.0);
             }
             if let (Some(tech_id), Some(stand)) = (
                 request.tech_id,
@@ -328,9 +379,13 @@ impl AirportEngine {
                             .is_none_or(|route| route.request_id != request.id);
                         if route_changed {
                             let blocked = state.blocked.clone();
-                            if let Some(path) =
-                                self.graph.shortest_path(start_id, &stand.node, &blocked)
-                            {
+                            if let Some(path) = self.graph.journey(
+                                start_id,
+                                &request.via,
+                                &stand.node,
+                                &blocked,
+                                state.terminal_spawn || self.vehicle_engineers.contains(&tech_id),
+                            ) {
                                 let mut points = vec![MapPoint {
                                     x: tech.x,
                                     y: tech.y,
@@ -348,7 +403,10 @@ impl AirportEngine {
                                         points,
                                         next_point: 1,
                                         published_next_point: 1,
-                                        speed: tech.speed.max(0.1),
+                                        via: request.via.clone(),
+                                        mode: path.mode,
+                                        speed: (path.distance_m / path.eta_seconds.max(0.001))
+                                            .max(0.1),
                                         unreachable: false,
                                     },
                                 );
@@ -364,7 +422,9 @@ impl AirportEngine {
                                         }],
                                         next_point: 1,
                                         published_next_point: 1,
-                                        speed: tech.speed.max(0.1),
+                                        via: request.via.clone(),
+                                        mode: "walk",
+                                        speed: 5.0 / 3.6,
                                         unreachable: true,
                                     },
                                 );
@@ -401,13 +461,13 @@ impl AirportEngine {
                             value["eta"] = json!(eta);
                             value["route_available"] = json!(!route.unreachable);
                             value["violation"] = json!(eta.is_some_and(|eta| eta > 900.0));
-                            value["travel_mode"] = json!("walk");
+                            value["travel_mode"] = json!(route.mode);
                             value["candidates"] = json!([{
                                 "tech_id": tech.id,
                                 "name": tech.name.clone(),
                                 "dist": if route.unreachable { Value::Null } else { json!(route_distance.round() as i64) },
                                 "eta": eta,
-                                "mode": "walk",
+                                "mode": route.mode,
                                 "reason": if route.unreachable { "маршрут перекрыт · требуется объезд" } else { "назначен системой · маршрут по открытым РД" }
                             }]);
                         }
@@ -431,11 +491,11 @@ impl AirportEngine {
         }
 
         state.tech_routes.retain(|tech_id, route| {
-            requests.iter().any(|request| {
-                request.id == route.request_id
-                    && request.tech_id == Some(*tech_id)
-                    && matches!(request.status.as_str(), "assigned" | "enroute")
-            })
+            match requests.iter().find(|request| request.id == route.request_id) {
+                Some(request) => request.tech_id == Some(*tech_id)
+                    && matches!(request.status.as_str(), "assigned" | "enroute"),
+                None => current_user.is_some_and(|user| user.role == "engineer"),
+            }
         });
 
         let dispatch_snapshot = current_user.is_none_or(|user| user.role == "dispatcher");
@@ -486,7 +546,7 @@ impl AirportEngine {
         let stats = json!({
             "techs_total":techs.len(),"techs_free":free_techs,"active":filtered_requests.len(),
             "waiting":waiting,"done":filtered_history.len(),"avg_response":Value::Null,"norm_pct":100,
-            "aircraft_total":state.aircraft.len(),"aircraft_parked":parked,"aircraft_inbound":0,
+            "aircraft_total":state.aircraft.len(),"aircraft_parked":parked,"aircraft_inbound":state.aircraft.iter().filter(|aircraft| aircraft.status == "inbound").count(),
             "aircraft_departing":state.aircraft.len().saturating_sub(parked),"gse_total":0,"gse_busy":0
         });
         let mut result = json!({
@@ -510,11 +570,18 @@ impl AirportEngine {
         result
     }
 
-    pub fn set_sim(&self, speed: Option<i64>, running: Option<bool>) -> Result<Value, String> {
+    pub fn set_sim(&self, speed: Option<i64>, running: Option<bool>, spawn: bool) -> Result<Value, String> {
         let mut state = self
             .state
             .write()
             .map_err(|_| "Состояние аэропорта недоступно".to_owned())?;
+        if spawn {
+            state.terminal_spawn = true;
+            let travelling: HashSet<i64> = state.tech_routes.keys().copied().collect();
+            for (id, position) in state.tech_positions.iter_mut() {
+                if !travelling.contains(id) { *position = self.terminal; }
+            }
+        }
         if let Some(speed) = speed {
             if ![1, 2, 5, 10, 20, 50].contains(&speed) {
                 return Err("Скорость симуляции должна быть 1, 2, 5, 10, 20 или 50".into());
@@ -527,67 +594,50 @@ impl AirportEngine {
         Ok(json!({"sim_speed":state.sim_speed,"sim_running":state.sim_running}))
     }
 
-    pub fn rank_technicians(
+    pub fn technician_etas(&self, request: &RequestRecord, users: &[PublicUser]) -> Vec<(i64, f64)> {
+        let Ok(state) = self.state.read() else { return Vec::new() };
+        self.rank_technicians(request, users, &HashSet::new(), &state)
+            .into_iter().map(|(eta, id, _)| (id, eta)).collect()
+    }
+
+    fn rank_technicians(
         &self,
-        stand_id: &str,
-        qualification: &str,
+        request: &RequestRecord,
         users: &[PublicUser],
-    ) -> Vec<(i64, f64)> {
-        let Some(stand) = self.stands.iter().find(|stand| stand.id == stand_id) else {
+        busy: &HashSet<i64>,
+        state: &EngineState,
+    ) -> Vec<(f64, i64, Value)> {
+        let Some(stand) = self.stands.iter().find(|stand| stand.id == request.stand) else {
             return Vec::new();
         };
-        if !self.nodes.contains_key(&stand.node) {
-            return Vec::new();
+        let mut ranked = Vec::new();
+        for user in users {
+            let Some(tech_id) = user.tech_id else { continue };
+            if user.role != "engineer" || user.status != "active" || !user.on_shift
+                || busy.contains(&tech_id) || user.qual.as_deref() != Some(request.qual.as_str())
+            {
+                continue;
+            }
+            let Some(origin) = state.tech_positions.get(&tech_id).copied().or_else(|| {
+                self.bases.get(user.base.as_deref()?).and_then(|base| self.nodes.get(&base.node)).copied()
+            }) else { continue };
+            let Some((start, node)) = self.nodes.iter().min_by(|(left_id, left), (right_id, right)| {
+                distance(origin.x, origin.y, left.x, left.y)
+                    .total_cmp(&distance(origin.x, origin.y, right.x, right.y))
+                    .then(left_id.cmp(right_id))
+            }) else { continue };
+            let Some(route) = self.graph.journey(
+                start, &request.via, &stand.node, &state.blocked,
+                state.terminal_spawn || self.vehicle_engineers.contains(&tech_id),
+            ) else { continue };
+            let approach = distance(origin.x, origin.y, node.x, node.y);
+            let eta = route.eta_seconds + approach * 3.6 / 5.0;
+            ranked.push((eta, tech_id, json!({
+                "tech_id": tech_id, "name": user.name, "eta": eta,
+                "dist": route.distance_m + approach, "mode": route.mode
+            })));
         }
-        let Ok(state) = self.state.read() else {
-            return Vec::new();
-        };
-        let mut ranked = users
-            .iter()
-            .filter(|user| {
-                user.role == "engineer"
-                    && user.status == "active"
-                    && user.on_shift
-                    && user.tech_id.is_some()
-                    && (qualification == "auto" || user.qual.as_deref() == Some(qualification))
-            })
-            .filter_map(|user| {
-                let tech_id = user.tech_id?;
-                let base = self.bases.get(user.base.as_deref().unwrap_or_default())?;
-                let base_point = self.nodes.get(&base.node)?;
-                let origin = state
-                    .tech_positions
-                    .get(&tech_id)
-                    .copied()
-                    .unwrap_or(*base_point);
-                let start_id = self
-                    .nodes
-                    .iter()
-                    .min_by(|(_, left), (_, right)| {
-                        distance(origin.x, origin.y, left.x, left.y)
-                            .total_cmp(&distance(origin.x, origin.y, right.x, right.y))
-                    })
-                    .map(|(id, _)| id.as_str())?;
-                let route = self
-                    .graph
-                    .shortest_path(start_id, &stand.node, &state.blocked)?;
-                let route_distance = distance(
-                    origin.x,
-                    origin.y,
-                    self.nodes.get(start_id)?.x,
-                    self.nodes.get(start_id)?.y,
-                ) + route.cost as f64 / 1_000.0;
-                let speed = state
-                    .base_techs
-                    .iter()
-                    .find(|tech| tech.id == tech_id)
-                    .map(|tech| tech.speed)
-                    .unwrap_or(4.0)
-                    .max(0.1);
-                Some((tech_id, route_distance / speed))
-            })
-            .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         ranked
     }
 
@@ -612,11 +662,12 @@ impl AirportEngine {
                     *tech_id,
                     route.request_id,
                     route.goal_node.clone(),
+                    route.via.clone(),
                     route.speed,
                 )
             })
             .collect::<Vec<_>>();
-        for (tech_id, request_id, goal_node, speed) in assignments {
+        for (tech_id, request_id, goal_node, via, speed) in assignments {
             let position = state.tech_positions.get(&tech_id).copied().or_else(|| {
                 state
                     .base_techs
@@ -639,7 +690,13 @@ impl AirportEngine {
             let replacement = start_id
                 .and_then(|start| {
                     self.graph
-                        .shortest_path(start, &goal_node, &state.blocked)
+                        .journey(
+                            start,
+                            &via,
+                            &goal_node,
+                            &state.blocked,
+                            state.terminal_spawn || self.vehicle_engineers.contains(&tech_id),
+                        )
                         .map(|path| {
                             let mut points = vec![position];
                             points.extend(
@@ -653,7 +710,9 @@ impl AirportEngine {
                                 points,
                                 next_point: 1,
                                 published_next_point: 1,
-                                speed,
+                                via: via.clone(),
+                                mode: path.mode,
+                                speed: (path.distance_m / path.eta_seconds.max(0.001)).max(0.1),
                                 unreachable: false,
                             }
                         })
@@ -664,6 +723,8 @@ impl AirportEngine {
                     points: vec![position],
                     next_point: 1,
                     published_next_point: 1,
+                    via,
+                    mode: "walk",
                     speed,
                     unreachable: true,
                 });
@@ -703,6 +764,37 @@ impl AirportEngine {
         state.sim_time += elapsed;
         let mut completed = Vec::new();
         for aircraft in &mut state.aircraft {
+            if aircraft.status == "inbound" {
+                let mut budget = elapsed * SIM_AIRCRAFT_SPEED_MPS;
+                let mut position = MapPoint { x: aircraft.x, y: aircraft.y };
+                while budget > 0.0 && aircraft.route.len() > 1 {
+                    let target = aircraft.route[1];
+                    let remaining = distance(position.x, position.y, target[0], target[1]);
+                    if remaining <= budget || remaining < 0.01 {
+                        position = MapPoint { x: target[0], y: target[1] };
+                        budget -= remaining;
+                        aircraft.route.remove(0);
+                    } else {
+                        let ratio = budget / remaining;
+                        position.x += (target[0] - position.x) * ratio;
+                        position.y += (target[1] - position.y) * ratio;
+                        budget = 0.0;
+                    }
+                }
+                aircraft.x = position.x;
+                aircraft.y = position.y;
+                if aircraft.route.len() > 1 {
+                    let next = aircraft.route[1];
+                    aircraft.heading = (next[0] - position.x).atan2(-(next[1] - position.y)).to_degrees();
+                    aircraft.eta_left = Some(aircraft.route.windows(2).map(|pair| distance(pair[0][0], pair[0][1], pair[1][0], pair[1][1])).sum::<f64>() / SIM_AIRCRAFT_SPEED_MPS);
+                } else {
+                    aircraft.status = "parked".into();
+                    aircraft.status_ru = "На стоянке".into();
+                    aircraft.route.clear();
+                    aircraft.eta_left = None;
+                    completed.push(aircraft.flight.clone());
+                }
+            }
             if aircraft.status == "servicing" {
                 aircraft.turnaround_progress =
                     (aircraft.turnaround_progress + elapsed * 0.25).min(100.0);
@@ -804,6 +896,11 @@ impl AirportEngine {
                     "status_ru": aircraft.status_ru,
                     "turnaround_progress": aircraft.turnaround_progress,
                     "services_progress": aircraft.services_progress,
+                    "x": aircraft.x,
+                    "y": aircraft.y,
+                    "heading": aircraft.heading,
+                    "route": aircraft.route,
+                    "eta_left": aircraft.eta_left,
                 })
             })
             .collect::<Vec<_>>();
@@ -872,12 +969,13 @@ impl AirportEngine {
         else {
             return Err("Все стоянки заняты".into());
         };
-        let aircraft = build_aircraft(
+        let mut aircraft = build_aircraft(
             state.next_aircraft_id,
             stand,
             &self.nodes,
             &self.airport_name,
         );
+        set_arrival_route(&mut aircraft, &stand.node, state.next_aircraft_id as usize - 1, &self.arrival_nodes, &self.graph, &self.nodes, &state.blocked);
         state.next_aircraft_id += 1;
         push_event(
             &mut state,
@@ -919,11 +1017,13 @@ impl AirportEngine {
             .map_err(|_| "Состояние аэропорта недоступно".to_owned())?;
         state.aircraft.clear();
         state.next_aircraft_id = 1;
-        for stand in self.stands.iter().take(4) {
+        for (index, stand) in self.stands.iter().enumerate() {
             let id = state.next_aircraft_id;
-            state
-                .aircraft
-                .push(build_aircraft(id, stand, &self.nodes, &self.airport_name));
+            let mut aircraft = build_aircraft(id, stand, &self.nodes, &self.airport_name);
+            if index < 2 && stand.registration.is_none() {
+                set_arrival_route(&mut aircraft, &stand.node, index, &self.arrival_nodes, &self.graph, &self.nodes, &state.blocked);
+            }
+            state.aircraft.push(aircraft);
             state.next_aircraft_id += 1;
         }
         state.blocked.clear();
@@ -976,8 +1076,7 @@ fn add_legacy_request_fields(
     value["vehicle_id"] = Value::Null;
     value["travel_mode"] = json!("walk");
     if request.status == "assigned" {
-        value["status"] = json!("enroute");
-        value["status_ru"] = json!("В пути");
+        value["status_ru"] = json!("Назначена");
     }
 }
 
@@ -997,7 +1096,7 @@ fn build_aircraft(
         id,
         flight: format!("SU{flight}"),
         stand: stand.id.clone(),
-        model: models[(id as usize - 1) % models.len()].into(),
+        model: stand.model.clone().unwrap_or_else(|| models[(id as usize - 1) % models.len()].into()),
         status: "parked".into(),
         status_ru: "На стоянке".into(),
         turnaround_progress: 100.0,
@@ -1011,7 +1110,7 @@ fn build_aircraft(
         route: Vec::new(),
         eta_left: None,
         parked_left: None,
-        brief: json!({"airline":"Аэрофлот","registration":format!("RA-{:05}",73000+id*37),"origin":{"iata":"LED","name":"Пулково (Санкт-Петербург)"},"destination":{"iata":"SVO","name":airport_name},"gate":format!("{}",1+(id%18))}),
+        brief: json!({"airline":"Аэрофлот","registration":stand.registration.clone().unwrap_or_else(|| format!("RA-{:05}",73000+id*37)),"origin":{"iata":"LED","name":"Пулково (Санкт-Петербург)"},"destination":{"iata":"VDN","name":airport_name},"gate":format!("{}",1+(id%18))}),
         services: Vec::new(),
         services_progress: 100,
         sched_arr_sim: -2700.0,
@@ -1019,6 +1118,86 @@ fn build_aircraft(
         sched_dep_sim: 5400.0 + id as f64 * 600.0,
         actual_dep_sim: 5400.0 + id as f64 * 600.0,
         delay_arr_sec: 120.0,
+    }
+}
+
+fn set_arrival_route(
+    aircraft: &mut Aircraft,
+    stand_node: &str,
+    index: usize,
+    arrival_nodes: &[String],
+    graph: &AirportGraph,
+    nodes: &HashMap<String, MapPoint>,
+    blocked: &HashSet<String>,
+) {
+    if arrival_nodes.is_empty() { return; }
+    let arrival = &arrival_nodes[index % arrival_nodes.len()];
+    let Some(path) = graph.journey(arrival, &[], stand_node, blocked, true) else { return; };
+    let route: Vec<[f64; 2]> = path.nodes.iter().filter_map(|id| nodes.get(id).map(|point| [point.x, point.y])).collect();
+    if route.len() <= 1 { return; }
+    aircraft.x = route[0][0];
+    aircraft.y = route[0][1];
+    aircraft.status = "inbound".into();
+    aircraft.status_ru = "На рулении".into();
+    aircraft.heading = (route[1][0] - route[0][0]).atan2(-(route[1][1] - route[0][1])).to_degrees();
+    aircraft.eta_left = Some(path.eta_seconds);
+    aircraft.route = route;
+}
+
+#[cfg(test)]
+mod vdnh_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_simulation_places_idle_technicians_and_starts_paused() {
+        let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
+        engine.state.write().unwrap().tech_positions.insert(42, MapPoint { x: 0.0, y: 0.0 });
+        engine.set_sim(Some(5), Some(false), true).unwrap();
+        let state = engine.state.read().unwrap();
+        assert!(!state.sim_running);
+        assert!(state.terminal_spawn);
+        assert_eq!(state.sim_speed, 5.0);
+        let p = state.tech_positions.get(&42).unwrap();
+        assert!(distance(p.x, p.y, engine.terminal.x, engine.terminal.y) < 0.01);
+        assert!(engine.nodes.values().any(|n| distance(n.x,n.y,p.x,p.y) < 0.01));
+    }
+
+    fn vdnh() -> Value {
+        serde_json::from_str(include_str!("../../data/airport_vdnh.json")).unwrap()
+    }
+
+    #[test]
+    fn vdnh_arrival_points_reach_every_stand_on_the_service_graph() {
+        let airport = vdnh();
+        let graph = AirportGraph::from_airport_json(&airport.to_string()).unwrap();
+        let arrivals: Vec<String> = serde_json::from_value(airport["arrival_nodes"].clone()).unwrap();
+        let stands: Vec<Stand> = serde_json::from_value(airport["stands"].clone()).unwrap();
+        for arrival in &arrivals {
+            for stand in &stands {
+                assert!(graph.journey(arrival, &[], &stand.node, &HashSet::new(), true).is_some(), "no VDNH taxi route from {arrival} to {}", stand.id);
+            }
+        }
+    }
+
+    #[test]
+    fn spawned_vdnh_aircraft_moves_from_arrival_route_to_its_stand() {
+        let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
+        let spawned = engine.spawn_aircraft().unwrap();
+        let id = spawned["id"].as_i64().unwrap();
+        let before = engine.snapshot(&[], &[], None)["aircraft"].as_array().unwrap().iter().find(|aircraft| aircraft["id"] == id).unwrap().clone();
+        assert_eq!(before["status"], "inbound");
+        engine.tick(0.25).unwrap();
+        let after = engine.snapshot(&[], &[], None)["aircraft"].as_array().unwrap().iter().find(|aircraft| aircraft["id"] == id).unwrap().clone();
+        assert_ne!((before["x"].as_f64(), before["y"].as_f64()), (after["x"].as_f64(), after["y"].as_f64()));
+    }
+
+    #[test]
+    fn vdnh_demo_starts_with_two_moving_aircraft() {
+        let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
+        let snapshot = engine.snapshot(&[], &[], None);
+        let aircraft = snapshot["aircraft"].as_array().unwrap();
+        assert_eq!(aircraft.len(), 4);
+        assert_eq!(aircraft.iter().filter(|plane| plane["status"] == "inbound").count(), 2);
     }
 }
 

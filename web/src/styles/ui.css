@@ -145,5 +145,20 @@ input:focus,select:focus,textarea:focus{border-color:rgba(255,255,255,.7);box-sh
 .win-close:hover{background:var(--red);border-color:var(--red);color:#fff}
 body.tauri-app .cmdbar{right:52px}
 body.tauri-app .detail{top:48px}
+body.tauri-app .dispatch.has-panel .cmdbar,body.tauri-app .dispatch.has-panel .demobar,body.tauri-app .dispatch.has-panel .legend{right:432px}
 
 .avatar-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+
+:root[data-theme="light"] .btn-ghost,:root[data-theme="light"] .btn-like,:root[data-theme="light"] .chip,:root[data-theme="light"] .popover,:root[data-theme="light"] .card-block,:root[data-theme="light"] .setting-row,:root[data-theme="light"] .theme-setting,:root[data-theme="light"] .callout,:root[data-theme="light"] .empty-icon{background:var(--raise-2)}
+:root[data-theme="light"] input:not([type=checkbox]):not([type=range]):not([type=file]),:root[data-theme="light"] select,:root[data-theme="light"] textarea{background-color:#fff;color:var(--text)}
+:root[data-theme="light"] input::placeholder,:root[data-theme="light"] textarea::placeholder{color:var(--text-4)}
+:root[data-theme="light"] select option{background:#fff;color:var(--text)}
+:root[data-theme="light"] .modal-foot{background:var(--bg-2)}
+:root[data-theme="light"] .switch{background:#cbd2d9}
+:root[data-theme="light"] .switch.on{background:var(--green)}
+:root[data-theme="light"] .toast{background:rgba(255,255,255,.98)}
+:root[data-theme="light"] .form-error{color:#922b31}
+:root[data-theme="light"] .note{color:#654000}
+:root[data-theme="light"] .callout.amber{color:#654000}
+:root[data-theme="light"] .auth-bg{background:#f4f6f8}
+:root[data-theme="light"] .boot{background:var(--bg)}

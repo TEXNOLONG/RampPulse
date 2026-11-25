@@ -1,16 +1,16 @@
 {
   "name": "ramppulse-desktop",
   "private": true,
-  "version": "0.6.17",
+  "version": "0.6.21",
   "scripts": {
     "tauri": "tauri",
     "desktop:dev": "node desktop/build_server.js && tauri dev",
     "desktop:build": "node desktop/build_server.js && tauri build",
-    "desktop:windows": "node desktop/build_server.js && node tools/build_client.mjs build --config src-tauri/tauri.windows.conf.json --features client-only",
+    "desktop:windows": "node desktop/build_server.js && node tools/build_client.mjs build --config src-tauri/tauri.windows.conf.json",
     "desktop:linux": "node desktop/build_server.js && node tools/build_client.mjs build --config src-tauri/tauri.linux.conf.json --features client-only",
     "android:config": "node tools/android_tauri_config.mjs",
-    "android:prepare": "npm run android:config && tauri android init --ci && node tools/android_permissions.mjs",
-    "android:build": "npm run android:config && node tools/android_permissions.mjs && node tools/build_client.mjs android build --apk --target aarch64 --config src-tauri/tauri.android.conf.json --features client-only",
+    "android:prepare": "npm run android:config && tauri android init --ci && node tools/android_permissions.mjs && node tools/android_patch_wry.mjs",
+    "android:build": "npm run android:config && node tools/android_permissions.mjs && node tools/android_patch_wry.mjs && node tools/build_client.mjs android build --apk --target aarch64 --config src-tauri/tauri.android.conf.json --features client-only",
     "ui:build": "npm --prefix web run build"
   },
   "devDependencies": {

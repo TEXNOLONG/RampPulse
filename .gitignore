@@ -39,3 +39,10 @@ src-tauri/capabilities/remote-server.json
 src-tauri/android/google-services.json
 src-tauri/gen/android/app/google-services.json
 firebase-adminsdk*.json
+
+.idea/
+artifacts/
+work/
+*.tsbuildinfo
+*.keystore
+*.jks

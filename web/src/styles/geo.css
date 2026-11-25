@@ -2,10 +2,10 @@
 .geo-mode-btn:hover,.geo-mode-btn.on{color:#F4F4F5;border-color:rgba(255,255,255,.3);background:rgba(0,0,0,.72)}
 .geo-map-loading{position:absolute;inset:0;z-index:30;display:grid;place-items:center;color:var(--text-2);font:600 12px var(--mono)}
 .geo-tile-error{position:absolute;left:50%;top:50%;z-index:30;transform:translate(-50%,-50%);padding:12px 16px;border-radius:12px;color:#fcd34d;font-size:12px}
-.geo-map-stage{position:absolute;inset:0;overflow:hidden;background:#09090B}
+.geo-map-stage{position:absolute;inset:0;z-index:0;isolation:isolate;overflow:hidden;background:#09090B}
 .geo-map{position:absolute;inset:0;background:#09090B}
 .geo-map.leaflet-container{width:100%;height:100%;background-color:#08080a;background-image:radial-gradient(70% 60% at 55% 50%,rgba(0,0,0,.06),transparent 70%),linear-gradient(rgba(255,255,255,.026) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.026) 1px,transparent 1px);background-size:100% 100%,52px 52px,52px 52px;font:12px var(--font)}
-.geo-map-imported .leaflet-tooltip.geo-dark-tooltip{border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(12,12,15,.94);color:#f4f4f5;box-shadow:0 5px 16px rgba(0,0,0,.4)}
+.geo-map .leaflet-tooltip.geo-dark-tooltip{border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(12,12,15,.94);color:#f4f4f5;box-shadow:0 5px 16px rgba(0,0,0,.4)}
 .geo-map .leaflet-tooltip.geo-stand-label{border-color:rgba(255,255,255,.11);background:rgba(12,12,15,.7);color:#a1a1aa;font:10px var(--mono);box-shadow:none}
 .geo-map .leaflet-control-zoom a{color:#e4e4e7;background:#15151b;border-color:#36363e}
 .geo-map .leaflet-control-attribution{background:rgba(12,12,15,.82);color:#a1a1aa;font-size:10px}
@@ -16,11 +16,11 @@
 .geo-aircraft-marker svg{width:22px;height:22px;overflow:visible;filter:drop-shadow(0 1px 2px #000)}
 .geo-aircraft-marker path{fill:currentColor}
 .geo-marker-shell:hover .geo-aircraft-marker{filter:brightness(1.25);scale:1.12}
-.geo-toolbar{position:absolute;top:138px;left:14px;z-index:800;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;width:max-content;max-width:calc(100% - 28px);padding:9px 11px;border-radius:14px}
+.geo-toolbar{position:absolute;top:138px;left:14px;right:58px;z-index:1100;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;width:auto;max-width:none;padding:9px 11px;border-radius:14px}
 .geo-layer-list{display:flex;gap:5px;flex:0 0 auto;flex-wrap:nowrap;white-space:nowrap}
 .geo-layer-list button,.geo-tools button{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:0 9px;border:1px solid transparent;border-radius:9px;color:var(--text-2);background:rgba(255,255,255,.035);font:600 10px var(--mono);letter-spacing:.04em}
 .geo-layer-list button:hover,.geo-tools button:hover,.geo-layer-list button.on,.geo-tools button.on{color:#d4d4d8;background:rgba(0,0,0,.16);border-color:rgba(255,255,255,.28)}
-.geo-weather-toggle{position:absolute;inset-inline-start:max(18px,env(safe-area-inset-left));inset-inline-end:auto;bottom:max(18px,env(safe-area-inset-bottom));z-index:1100;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;width:min(236px,calc(100% - 36px));min-height:46px;margin:0;padding:0 16px;border:1px solid var(--line-2);border-radius:12px;color:var(--text-2);background:rgba(12,12,15,.98);box-shadow:0 8px 24px rgba(0,0,0,.42);backdrop-filter:blur(14px);transform:none;transition:border-color .18s ease,background .18s ease}
+.geo-weather-toggle{position:absolute;inset-inline-start:max(18px,env(safe-area-inset-left));inset-inline-end:auto;bottom:max(62px,calc(env(safe-area-inset-bottom) + 62px));z-index:1130;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:12px;width:min(260px,calc(100% - 36px));min-height:46px;margin:0;padding:0 16px;border:1px solid var(--line-2);border-radius:12px;color:var(--text-2);background:var(--glass-strong);box-shadow:var(--shadow-1);backdrop-filter:blur(14px);transform:none;transition:border-color .18s ease,background .18s ease}
 .geo-weather-toggle:hover{border-color:var(--line-3);background:#111113}
 .geo-weather-toggle:active{transform:none}
 .geo-weather-toggle.on{border-color:rgba(255,255,255,.35);background:#111113}
@@ -33,7 +33,7 @@
 .geo-weather-toggle.stale>i{background:#fbbf24}
 .geo-weather-toggle.error>i,.geo-weather-toggle.offline>i{background:#f87171}
 @keyframes weather-pulse{50%{opacity:.35;transform:scale(.82)}}
-.geo-weather-panel{position:absolute;top:14px;right:14px;bottom:72px;z-index:1200;display:flex;flex-direction:column;width:min(380px,calc(100% - 28px));overflow:hidden;border:1px solid var(--line-2);border-radius:18px;background:var(--glass-strong);box-shadow:0 18px 56px rgba(0,0,0,.48);backdrop-filter:blur(18px);animation:weather-panel-in .24s cubic-bezier(.2,.8,.2,1)}
+.geo-weather-panel{position:absolute;top:14px;right:14px;bottom:72px;z-index:1130;display:flex;flex-direction:column;width:min(380px,calc(100% - 28px));overflow:hidden;border:1px solid var(--line-2);border-radius:18px;background:var(--glass-strong);box-shadow:var(--shadow-2);backdrop-filter:blur(18px);animation:weather-panel-in .24s cubic-bezier(.2,.8,.2,1)}
 @keyframes weather-panel-in{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}
 .geo-weather-panel.closing{animation:weather-panel-out .17s ease-in forwards}@keyframes weather-panel-out{to{opacity:0;transform:translateX(14px)}}
 .geo-weather-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 18px 13px;border-bottom:1px solid var(--line-2)}
@@ -71,10 +71,10 @@
 .geo-feed-status.stale{color:#fcd34d}.geo-feed-status.stale i{background:#fbbf24}
 .geo-feed-status.offline{color:#fca5a5}.geo-feed-status.offline i{background:#f87171}
 .geo-toolbar .geo-feed-error{flex:1 0 100%;color:#fca5a5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.geo-tools{position:absolute;right:16px;top:50%;z-index:800;display:flex;flex-direction:column;gap:5px;padding:5px;border-radius:13px}
+.geo-tools{position:absolute;right:16px;top:50%;z-index:1100;display:flex;flex-direction:column;gap:5px;padding:5px;border-radius:13px}
 .geo-tools button{width:36px;height:36px;justify-content:center;padding:0}
 .geo-tools button:disabled{opacity:.35;cursor:not-allowed}
-.geo-gps-card{position:absolute;right:max(18px,env(safe-area-inset-right));bottom:max(76px,calc(env(safe-area-inset-bottom) + 76px));z-index:810;width:min(330px,calc(100% - 100px));max-height:min(48dvh,420px);overflow:auto;padding:13px;border-radius:15px}
+.geo-gps-card{position:absolute;right:max(18px,env(safe-area-inset-right));bottom:max(76px,calc(env(safe-area-inset-bottom) + 76px));z-index:1120;width:min(330px,calc(100% - 100px));max-height:min(48dvh,420px);overflow:auto;padding:13px;border-radius:15px}
 .geo-gps-coords,.geo-gps-stats{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
 .geo-gps-coords span,.geo-gps-stats span{display:flex;flex-direction:column;gap:3px;color:var(--text-3);font:9px var(--mono);letter-spacing:.04em}
 .geo-gps-coords b,.geo-gps-stats b{color:var(--text);font-size:11px;letter-spacing:0;overflow-wrap:anywhere}
@@ -82,22 +82,29 @@
 .geo-gps-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:11px;padding-top:9px;border-top:1px solid var(--line-2);color:var(--text-3);font:9px var(--mono)}
 .geo-gps-footer button{display:inline-flex;align-items:center;gap:5px;color:#a7f3d0;font-weight:700;white-space:nowrap}
 .geo-jump{display:block;margin-top:8px;color:#fcd34d;font-size:10px}
-.geo-gps-error,.geo-map-note{position:absolute;left:14px;bottom:72px;z-index:800;max-width:min(500px,calc(100% - 28px));padding:10px 13px;border-radius:12px;color:#fecaca;font-size:12px}
+.geo-gps-error,.geo-map-note{position:absolute;left:14px;bottom:72px;z-index:1120;max-width:min(500px,calc(100% - 28px));padding:10px 13px;border-radius:12px;color:#fecaca;font-size:12px}
 .geo-gps-error{display:flex;align-items:center;gap:12px;border-color:rgba(248,113,113,.36)}
 .geo-gps-error button{padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.08);color:#fff;white-space:nowrap}
 .geo-map-note{bottom:116px;color:#fcd34d;border-color:rgba(251,191,36,.3)}
-.geo-aircraft-card{position:absolute;top:138px;right:62px;z-index:810;width:min(360px,calc(100% - 90px));padding:16px;border-radius:16px}
+.geo-aircraft-card{position:absolute;top:138px;right:62px;z-index:1120;width:min(360px,calc(100% - 90px));padding:16px;border-radius:16px}
 .geo-aircraft-card h3{margin:5px 28px 14px 0;font-size:18px}
 .geo-card-close{position:absolute;right:12px;top:12px;display:grid;place-items:center;width:28px;height:28px;border-radius:8px;color:var(--text-2);background:rgba(255,255,255,.06)}
 .geo-aircraft-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .geo-aircraft-grid span{display:flex;flex-direction:column;gap:3px;color:var(--text-3);font:9px var(--mono);letter-spacing:.05em}
 .geo-aircraft-grid b{color:var(--text);font-size:11px;letter-spacing:0;overflow-wrap:anywhere}
 .geo-copy{display:flex;align-items:center;gap:7px;margin-top:14px;padding:8px 10px;border-radius:9px;background:rgba(0,0,0,.16);color:#F4F4F5;font-size:11px}
-.geo-attribution{position:absolute;left:14px;top:10px;z-index:800;display:flex;align-items:center;gap:7px;max-width:min(440px,calc(100% - 28px));padding:6px 9px;border-radius:8px;color:#a1a1aa;font:10px var(--mono)}
+.geo-attribution{position:absolute;right:14px;top:84px;z-index:1100;display:flex;align-items:center;gap:7px;max-width:min(440px,calc(100% - 28px));padding:6px 9px;border-radius:8px;color:#a1a1aa;font:10px var(--mono)}
 .geo-attribution>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .geo-provider-logo{flex:none;color:#fff;font:800 10px var(--font);letter-spacing:-.04em}
 .geo-attribution a{color:#F4F4F5}
-.geo-close{position:absolute;right:58px;top:138px;z-index:820;display:grid;place-items:center;width:32px;height:32px;border-radius:9px;color:var(--text-2)}
-@media(max-width:900px){.geo-toolbar{left:10px;gap:7px 9px;max-width:calc(100% - 20px);padding:8px}.geo-layer-list{flex-wrap:wrap;white-space:normal}.geo-toolbar>small{white-space:normal;text-align:right}.geo-map-stage.weather-open .leaflet-control-zoom{margin-right:0}}
-@media(max-width:520px){.geo-toolbar{top:124px;left:8px;right:8px;width:auto;gap:7px;max-width:calc(100% - 16px);padding:7px}.geo-layer-list{flex:1 0 100%;flex-wrap:wrap;white-space:normal}.geo-toolbar>small{display:none}.geo-weather-toggle{inset-inline-start:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));width:min(224px,calc(100% - 24px));min-height:44px;padding:0 14px}.geo-weather-panel{top:auto;right:8px;bottom:58px;left:8px;width:auto;max-height:min(68dvh,560px);border-radius:16px}.geo-weather-scroll{padding:12px}.geo-weather-location{margin-top:12px}.geo-map-stage.weather-open .geo-tools{top:220px;right:12px}.geo-map-stage.weather-open .geo-gps-card{display:none}.geo-aircraft-card{top:auto;right:8px;bottom:64px;width:min(360px,calc(100% - 16px));max-height:55dvh;overflow:auto}.geo-gps-card{right:8px;bottom:max(64px,calc(env(safe-area-inset-bottom) + 64px));width:min(360px,calc(100% - 16px));max-height:45dvh}.geo-gps-error{bottom:max(72px,calc(env(safe-area-inset-bottom) + 72px))}.geo-map-note{bottom:116px}.geo-close{top:124px;right:8px}.geo-attribution{left:8px;top:8px;max-width:calc(100% - 16px);font-size:9px}}
+.geo-close{position:absolute;right:14px;top:138px;z-index:1140;display:grid;place-items:center;width:32px;height:32px;border-radius:9px;color:var(--text-2);background:var(--glass-strong);border:1px solid var(--line-2)}
+@media(max-width:900px){.geo-toolbar{left:10px;right:50px;gap:7px 9px;padding:8px}.geo-layer-list{flex-wrap:wrap;white-space:normal}.geo-toolbar>small{white-space:normal;text-align:right}.geo-map-stage.weather-open .leaflet-control-zoom{margin-right:0}}
+@media(max-width:520px){.geo-toolbar{top:124px;left:8px;right:44px;width:auto;gap:7px;padding:7px}.geo-layer-list{flex:1 0 100%;flex-wrap:wrap;white-space:normal}.geo-toolbar>small{display:none}.geo-weather-toggle{inset-inline-start:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));width:min(224px,calc(100% - 24px));min-height:44px;padding:0 14px}.geo-weather-panel{top:auto;right:8px;bottom:58px;left:8px;width:auto;max-height:min(68dvh,560px);border-radius:16px}.geo-weather-scroll{padding:12px}.geo-weather-location{margin-top:12px}.geo-map-stage.weather-open .geo-tools{top:220px;right:12px}.geo-map-stage.weather-open .geo-gps-card{display:none}.geo-aircraft-card{top:auto;right:8px;bottom:64px;width:min(360px,calc(100% - 16px));max-height:55dvh;overflow:auto}.geo-gps-card{right:8px;bottom:max(64px,calc(env(safe-area-inset-bottom) + 64px));width:min(360px,calc(100% - 16px));max-height:45dvh}.geo-gps-error{bottom:max(72px,calc(env(safe-area-inset-bottom) + 72px))}.geo-map-note{bottom:116px}.geo-close{top:124px;right:8px}.geo-attribution{left:8px;top:8px;max-width:calc(100% - 16px);font-size:9px}}
+:root[data-theme="light"] .geo-map-stage,:root[data-theme="light"] .geo-map{background-color:#e9edf0;background-image:linear-gradient(rgba(23,33,43,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(23,33,43,.035) 1px,transparent 1px)}
+:root[data-theme="light"] .geo-map .leaflet-tooltip.geo-dark-tooltip{background:rgba(255,255,255,.95);color:#17212b;border-color:rgba(23,33,43,.16)}
+:root[data-theme="light"] .geo-map .leaflet-control-zoom a{color:#17212b;background:#fff;border-color:#cbd2d9}
+:root[data-theme="light"] .geo-map .leaflet-control-attribution{background:rgba(255,255,255,.9);color:#485563}
+:root[data-theme="light"] .geo-map .leaflet-control-attribution a{color:#17212b}
+:root[data-theme="light"] .geo-weather-error{color:#922b31}
 @media(prefers-reduced-motion:reduce){.geo-weather-toggle,.geo-weather-panel{animation:none;transition:none}.geo-weather-toggle.connecting>i,.geo-weather-toggle.updating>i,.weather-spin{animation:none}}
+@media(max-width:520px){.geo-weather-toggle{bottom:max(56px,calc(env(safe-area-inset-bottom) + 56px))}.geo-attribution{right:8px;left:auto;top:84px;max-width:calc(100% - 16px)}}

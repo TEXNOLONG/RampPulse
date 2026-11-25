@@ -4,19 +4,19 @@ import { ClipboardList, Plane, Users, ScrollText, MessageSquare, Settings, Pause
 import { useOps, act } from '../../store/ops';
 import { useChat, useUnreadTotal } from '../../store/chat';
 import { AirportMap } from '../map/AirportMap';
-import { pathLength, type Comparison, type MapEngine } from '../map/engine';
+import { type MapEngine } from '../map/engine';
 import { Queue, type QueueTab } from './Queue';
 import { RequestDetail, TechDetail, AircraftDetail } from './Details';
 import { NewRequestModal } from './NewRequestModal';
 import { ChatPanel } from '../chat/ChatPanel';
 import { SettingsModal, type SettingsTab } from '../settings/SettingsModal';
-import { Avatar, Switch, toast } from '../../components/ui';
+import { Avatar, toast } from '../../components/ui';
 import { Logo } from '../../components/BootScreen';
 import { cx, simClock } from '../../lib/format';
 import { errorText, post } from '../../lib/api';
 import { kpis } from './shared';
 import { desktop } from '../../lib/desktop';
-import type { Point, Request } from '../../lib/types';
+import type { Request } from '../../lib/types';
 
 const SPEEDS = [1, 2, 5, 10, 20, 50];
 const GeoMap = lazy(() => import('../map/GeoMap').then(module => ({ default: module.GeoMap })));
@@ -33,10 +33,8 @@ export function DispatcherApp() {
   const [sel, setSel] = useState<{ request: number | null; tech: number | null; aircraft: number | null }>({ request: null, tech: null, aircraft: null });
   const [newReq, setNewReq] = useState<{ open: boolean; stand?: string }>({ open: false });
   const [settings, setSettings] = useState<SettingsTab | null>(null);
-  const [compare, setCompare] = useState(false);
-  const [comparison, setComparison] = useState<Comparison | null>(null);
   const [moveTech, setMoveTech] = useState<number | null>(null);
-  const [mapMode, setMapMode] = useState<'ops' | 'geo' | 'it2026'>('ops');
+  const [mapMode, setMapMode] = useState<'ops' | 'geo' | 'it2026'>('it2026');
   const [menu, setMenu] = useState<'scenarios' | 'profile' | null>(null);
   const engine = useRef<MapEngine | null>(null);
 
@@ -54,38 +52,8 @@ export function DispatcherApp() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // Human vs system: pick the slowest eligible alternative as the "by eye" choice.
-  useEffect(() => {
-    if (!compare || !request?.tech_id) { setComparison(null); return; }
-    if (comparison?.requestId === request.id) return;
-    const sys = state.techs.find(t => t.id === request.tech_id);
-    const stand = airport.stands.find(s => s.id === request.stand);
-    const goal = stand && airport.nodes.find(n => n.id === stand.node);
-    if (!sys || !goal || !engine.current) return;
-    const alts = state.techs.filter(t => t.id !== sys.id && t.on_shift && (request.qual === 'auto' || t.qual === request.qual));
-    if (!alts.length) { toast.info('Для сравнения нужен второй инженер с тем же допуском'); return; }
-    let cancelled = false;
-    (async () => {
-      const scored = (await Promise.all(alts.map(async t => {
-        const from = engine.current!.nearestNode(t.x, t.y);
-        if (!from) return null;
-        try {
-          const res: any = await act.routePreview(from.id, goal.id);
-          const points: Point[] = [[t.x, t.y], ...(res.points || []).map((p: any) => [p.x, p.y] as Point)];
-          return { t, points, eta: pathLength(points) / Math.max(0.5, t.speed) / 60 };
-        } catch { return null; }
-      }))).filter(Boolean) as { t: typeof alts[number]; points: Point[]; eta: number }[];
-      if (cancelled || !scored.length) return;
-      scored.sort((a, b) => b.eta - a.eta);
-      const human = scored[0];
-      const sysPoints: Point[] = sys.route?.length > 1 ? [[sys.x, sys.y], ...sys.route.slice(1)] : [[sys.x, sys.y], [goal.x, goal.y]];
-      setComparison({ requestId: request.id, human: human.points, system: sysPoints, humanName: human.t.name, humanEta: human.eta, systemEta: pathLength(sysPoints) / Math.max(0.5, sys.speed) / 60 });
-    })();
-    return () => { cancelled = true; };
-  }, [compare, request?.id, request?.tech_id]);
-
   const select = (patch: Partial<typeof sel>) => setSel({ request: null, tech: null, aircraft: null, ...patch });
-  const saved = comparison && comparison.requestId === request?.id ? Math.max(0, comparison.humanEta - comparison.systemEta) : null;
+
 
   async function scenario(n: number) {
     setMenu(null);
@@ -112,8 +80,8 @@ export function DispatcherApp() {
       } else if (n === 4) {
         created = await create(standAt(0), 'Отказ навигационного комплекса · требуется редкий допуск', 'Авионика');
       } else {
-        created = await create(standAt(0), n === 5 ? 'Сравнение выбора диспетчера и системы' : 'Штатный вызов инженера на перрон');
-        if (n === 5) setCompare(true);
+        created = await create(standAt(0), 'Штатный вызов инженера на перрон');
+
       }
       await useOps.getState().reload();
       const id = Number(created?.id ?? created?.request?.id);
@@ -123,7 +91,7 @@ export function DispatcherApp() {
   }
 
   return (
-    <div className={cx('dispatch', panel && 'has-panel')}>
+    <div className={cx('dispatch', (panel || chatOpen) && 'has-panel')}>
       <nav className="rail">
         <Logo size={38} />
         <div className="rail-nav">
@@ -132,9 +100,9 @@ export function DispatcherApp() {
           <RailBtn on={tab === 'team'} label="Команда" onClick={() => setTab('team')} badge={state.registrations?.length}><Users size={20} /></RailBtn>
           <RailBtn on={tab === 'log'} label="Журнал" onClick={() => setTab('log')}><ScrollText size={20} /></RailBtn>
           <span className="rail-sep" />
-          <RailBtn on={mapMode === 'ops'} label="Схема перрона" onClick={() => { setMapMode('ops'); setMoveTech(null); }}><Map size={20} /></RailBtn>
-          <RailBtn on={mapMode === 'geo'} label="Географическая карта" onClick={() => { setMapMode('geo'); setMoveTech(null); }}><Globe2 size={20} /></RailBtn>
-          <RailBtn on={mapMode === 'it2026'} label="Новая карта · IT2026" onClick={() => { setMapMode('it2026'); setMoveTech(null); }}><Map size={20} /></RailBtn>
+          <RailBtn on={mapMode === 'it2026'} label="Карта ВДНХ" onClick={() => { setMapMode('it2026'); setMoveTech(null); }}><Map size={20} /></RailBtn>
+          <RailBtn on={mapMode === 'ops'} label="Схема операций ВДНХ" onClick={() => { setMapMode('ops'); setMoveTech(null); }}><Map size={20} /></RailBtn>
+          <RailBtn on={mapMode === 'geo'} label="Географический вид ВДНХ" onClick={() => { setMapMode('geo'); setMoveTech(null); }}><Globe2 size={20} /></RailBtn>
           <RailBtn on={chatOpen} label="Связь смены" onClick={() => useChat.getState().setOpen(!chatOpen)} badge={unread}><MessageSquare size={20} /></RailBtn>
         </div>
         <div className="rail-foot">
@@ -158,8 +126,8 @@ export function DispatcherApp() {
         onNewRequest={stand => setNewReq({ open: true, stand })} />
 
       <main className="workspace">
-        {mapMode !== 'ops' ? <Suspense fallback={<div className="geo-map-loading glass">Loading geographic map…</div>}><GeoMap key={mapMode} airport={airport} simulated={state.aircraft} panelOpen={Boolean(panel || chatOpen)} importedAirport={mapMode === 'it2026'} engineerLocations={engineerLocations} /></Suspense> : <AirportMap selection={{ request: sel.request, tech: sel.tech ?? request?.tech_id ?? null, aircraft: sel.aircraft, stand: request?.stand ?? aircraft?.stand ?? null }}
-          comparison={compare ? comparison : null} interactiveEdges onReady={e => { engine.current = e; }}
+        {mapMode !== 'ops' ? <Suspense fallback={<div className="geo-map-loading glass">Loading geographic map…</div>}><GeoMap key={mapMode} airport={airport} simulated={state.aircraft} simulatedTechs={state.techs} requests={state.active} panelOpen={Boolean(panel || chatOpen)} importedAirport={mapMode === 'it2026'} engineerLocations={engineerLocations} /></Suspense> : <AirportMap selection={{ request: sel.request, tech: sel.tech ?? request?.tech_id ?? null, aircraft: sel.aircraft, stand: request?.stand ?? aircraft?.stand ?? null }}
+          interactiveEdges onReady={e => { engine.current = e; }}
           onStand={id => {
             if (moveTech != null) return;
             const r = state.active.find(x => x.stand === id);
@@ -191,17 +159,17 @@ export function DispatcherApp() {
           <div className="cmd-stats kpi">
             <Stat value={k.avg == null ? '—' : k.avg.toFixed(1)} unit="мин" label="среднее прибытие" />
             <Stat value={k.sla == null ? '—' : `${Math.round(k.sla)}%`} label="в нормативе 15 мин" tone="green" />
-            <Stat value={saved == null ? "—" : `+${saved.toFixed(1)}`} unit="мин" label="сэкономлено системой" tone="accent" />
           </div>
           <span className="cmd-spacer" />
           <div className="cmd-controls">
             <button className={cx('geo-mode-btn', mapMode === 'geo' && 'on')} onClick={() => { setMapMode(mode => mode === 'ops' ? 'geo' : 'ops'); setMoveTech(null); }} title={mapMode === 'ops' ? 'Открыть географическую карту' : 'Вернуться к схеме перрона'} aria-label={mapMode === 'ops' ? 'Географическая карта' : 'Схема перрона'}><Globe2 size={16} /><span>{mapMode === 'ops' ? 'GEO' : 'OPS'}</span></button>
             <div className="sim">
+              <button className="sim-btn" title="Разместить свободных техников у терминала; назначенные продолжают маршрут" onClick={() => act.sim({ spawn_at_terminal: true, running: false }).then(() => useOps.getState().reload()).catch(e => toast.bad(errorText(e)))}>У терминала</button>
               <select value={state.sim_speed} onChange={e => act.sim({ speed: Number(e.target.value) }).catch(err => toast.bad(errorText(err)))} aria-label="Скорость симуляции">
                 {SPEEDS.map(s => <option key={s} value={s}>×{s}</option>)}
               </select>
-              <button className={cx('sim-btn', !state.sim_running && 'paused')} onClick={() => act.sim({ running: !state.sim_running }).catch(e => toast.bad(errorText(e)))}>
-                {state.sim_running ? <Pause size={15} /> : <Play size={15} />}<span>{state.sim_running ? 'Пауза' : 'Пуск'}</span>
+              <button title={state.sim_running ? 'Приостановить симуляцию' : 'Включить симуляцию'} className={cx('sim-btn', !state.sim_running && 'paused')} onClick={() => act.sim({ running: !state.sim_running }).then(() => { if (!state.sim_running && !state.active.some(r => r.tech_id && ['assigned', 'enroute'].includes(r.status))) toast.info('Симуляция включена. Создайте заявку и назначьте инженера — он начнёт движение по маршруту.'); return useOps.getState().reload(); }).catch(e => toast.bad(errorText(e)))}>
+                {state.sim_running ? <Pause size={15} /> : <Play size={15} />}<span>{state.sim_running ? 'Пауза' : 'Симуляция'}</span>
               </button>
             </div>
             <span className={cx('conn', online ? 'on' : 'off')} title={online ? 'Связь с сервером установлена' : 'Переподключение…'}>{online ? <Wifi size={16} /> : <WifiOff size={16} />}</span>
@@ -214,18 +182,14 @@ export function DispatcherApp() {
             {menu === 'scenarios' && (
               <div className="popover scen-pop glass">
                 <span className="eyebrow">Контрольные сценарии ТЗ</span>
-                {[['Штатный вызов', 'Ближайший инженер по графу РД'], ['Перекрытие РД', 'Объезд закрытой рулёжки'], ['Пиковая нагрузка', 'Три борта одновременно'], ['Дефицит квалификации', 'Редкий допуск, очередь'], ['Человек vs система', 'Сравнение с выбором «на глаз»']].map(([t, d], i) => (
+                {[['Штатный вызов', 'Ближайший инженер по графу РД'], ['Перекрытие РД', 'Объезд закрытой рулёжки'], ['Пиковая нагрузка', 'Три борта одновременно'], ['Дефицит квалификации', 'Редкий допуск, очередь']].map(([t, d], i) => (
                   <button key={t} onClick={() => scenario(i + 1)}><i>{String(i + 1).padStart(2, '0')}</i><span><b>{t}</b><small>{d}</small></span></button>
                 ))}
                 <button className="danger-row" onClick={() => { setMenu(null); act.reset().then(() => { select({}); toast.ok('Демо-данные сброшены'); }); }}><X size={15} /><span><b>Сбросить смену</b><small>Удалить заявки и журнал</small></span></button>
               </div>
             )}
           </div>
-          <label className="compare glass"><span className="legend-pair"><i className="h" /><i className="s" /></span>Человек vs система<Switch checked={compare} onChange={setCompare} label="Человек против системы" /></label>
-          {compare && comparison && request && comparison.requestId === request.id && (
-            <div className="compare-note glass"><span>{comparison.humanName}: {comparison.humanEta.toFixed(1)} мин</span><b>Система: {comparison.systemEta.toFixed(1)} мин</b></div>
-          )}
-          {compare && !request && <div className="compare-note glass"><span>Выберите заявку</span><b>для сравнения</b></div>}
+
         </div>
 
         <div className="legend glass">

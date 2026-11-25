@@ -1,10 +1,11 @@
 mod airport_engine;
-mod aviation;
+mod field;
 mod push;
 mod realtime;
 mod store;
 mod weather;
 
+use axum::http::Method;
 use axum::RequestExt;
 use axum::{
     body::Bytes,
@@ -17,7 +18,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use axum::http::Method;
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine as _,
@@ -30,7 +30,6 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use subtle::ConstantTimeEq;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::task;
@@ -38,15 +37,14 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use airport_engine::AirportEngine;
-use aviation::AviationService;
-use weather::WeatherService;
 use futures_util::StreamExt;
+use push::PushService;
 use ramppulse_core::{
     ActorRef, AirportGraph, EntityRef, EventKind, RealtimeEvent, REALTIME_PROTOCOL_VERSION,
 };
 use realtime::{Audience, RealtimeHub};
 use store::{AccountStore, NewEngineer, NewRequest, ShiftFailure};
-use push::PushService;
+use weather::WeatherService;
 
 const COOKIE_NAME: &str = "oto_session";
 const SESSION_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
@@ -72,9 +70,10 @@ struct AppState {
     livekit_api_key: Option<String>,
     livekit_api_secret: Option<String>,
     push: Option<PushService>,
-    aviation: AviationService,
     weather: WeatherService,
-    engineer_locations: Arc<std::sync::Mutex<std::collections::HashMap<i64, (EngineerLocation, std::time::Instant)>>>,
+    engineer_locations: Arc<
+        std::sync::Mutex<std::collections::HashMap<i64, (EngineerLocation, std::time::Instant)>>,
+    >,
     login_guard: Arc<std::sync::Mutex<std::collections::HashMap<String, LoginAttempts>>>,
 }
 
@@ -111,6 +110,8 @@ impl IntoResponse for HttpError {
 
 #[derive(Deserialize)]
 struct LoginBody {
+    #[serde(default)]
+    device_id: Option<Uuid>,
     email: String,
     password: String,
     #[serde(default)]
@@ -131,6 +132,10 @@ struct RegisterBody {
 
 #[derive(Deserialize)]
 struct RoutePreviewBody {
+    #[serde(default)]
+    via: Vec<String>,
+    #[serde(default)]
+    vehicle_available: bool,
     from: String,
     to: String,
     #[serde(default)]
@@ -139,6 +144,8 @@ struct RoutePreviewBody {
 
 #[derive(Deserialize)]
 struct CreateRequestBody {
+    #[serde(default)]
+    via: Vec<String>,
     stand: String,
     description: String,
     qual: String,
@@ -153,6 +160,15 @@ struct CreateRequestBody {
 #[derive(Deserialize)]
 struct RequestStatusBody {
     status: String,
+    #[serde(default)]
+    confirm_shift_lead: bool,
+}
+
+#[derive(Deserialize)]
+struct RequestAssignBody {
+    tech_id: i64,
+    #[serde(default)]
+    confirm_reassignment: bool,
 }
 
 #[derive(Deserialize)]
@@ -187,10 +203,14 @@ struct CallRelayBody {
     signal: serde_json::Value,
 }
 #[derive(Deserialize)]
-struct PushDeviceBody { token: String }
+struct PushDeviceBody {
+    token: String,
+}
 
 #[derive(Deserialize)]
 struct SimulationBody {
+    #[serde(default)]
+    spawn_at_terminal: bool,
     speed: Option<i64>,
     running: Option<bool>,
 }
@@ -213,6 +233,7 @@ struct TechProfileBody {
 }
 #[derive(Deserialize)]
 struct EngineerLocationBody {
+    observed_ms: Option<i64>,
     enabled: bool,
     latitude: Option<f64>,
     longitude: Option<f64>,
@@ -247,14 +268,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.seed_demo()?;
     }
 
-    let airport_file =
-        env::var("AIRPORT_FILE").unwrap_or_else(|_| "data/airport_sheremetyevo.json".into());
-    let airport_text = fs::read_to_string(&airport_file)?;
+    let airport_text = include_str!("../../data/airport_vdnh.json");
     let airport_data: serde_json::Value = serde_json::from_str(&airport_text)?;
     let airport_name = airport_data
         .get("name")
         .and_then(|value| value.as_str())
-        .unwrap_or("Шереметьево (SVO · UUEE)")
+        .unwrap_or("ВДНХ · IT2026 Aero GeoData")
         .to_owned();
     let airport_graph = AirportGraph::from_airport_json(&airport_text)?;
     let tech_seed = fs::read_to_string("data/technicians.json").unwrap_or_else(|_| "[]".into());
@@ -285,16 +304,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         turn_shared_secret: env::var("TURN_SHARED_SECRET")
             .ok()
             .filter(|value| !value.is_empty()),
-        livekit_url: env::var("LIVEKIT_URL").ok().filter(|value| !value.is_empty()),
-        livekit_api_key: env::var("LIVEKIT_API_KEY").ok().filter(|value| !value.is_empty()),
-        livekit_api_secret: env::var("LIVEKIT_API_SECRET").ok().filter(|value| !value.is_empty()),
+        livekit_url: env::var("LIVEKIT_URL")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        livekit_api_key: env::var("LIVEKIT_API_KEY")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        livekit_api_secret: env::var("LIVEKIT_API_SECRET")
+            .ok()
+            .filter(|value| !value.is_empty()),
         push: PushService::from_env(),
-        aviation: AviationService::from_env()?,
         weather: WeatherService::from_env()?,
         engineer_locations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         login_guard: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
+    tokio::spawn(field::warnings(state.clone()));
     let tick_engine = state.engine.clone();
     let tick_hub = state.realtime.clone();
     let tick_store = state.store.clone();
@@ -307,7 +332,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/logout-others", post(logout_others))
         .route("/api/profile", get(profile).post(update_profile))
-        .route("/api/profile/media/{user_id}/{kind}", get(get_profile_media).post(upload_profile_media).delete(delete_profile_media).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route(
+            "/api/profile/media/{user_id}/{kind}",
+            get(get_profile_media)
+                .post(upload_profile_media)
+                .delete(delete_profile_media)
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/profile/password", post(change_password))
         .route("/api/presence", get(presence))
         .route("/api/push/register", post(register_push_device))
@@ -317,14 +348,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/push/unregister", post(unregister_push_device))
         .route("/api/chat/rooms/{id}/typing", post(chat_typing))
         .route("/api/airport", get(airport))
-        .route("/api/aircraft/live", get(live_aircraft))
         .route("/api/weather/current", get(current_weather))
+        .route(
+            "/api/agents/positions",
+            get(field::positions).post(field::ingest),
+        )
         .route("/api/engineer/location", post(update_engineer_location))
         .route("/api/engineers/locations", get(engineer_locations))
         .route("/api/state", get(state_snapshot))
         .route("/api/routes/preview", post(route_preview))
         .route("/api/requests", get(list_requests).post(create_request))
         .route("/api/requests/{id}/status", post(change_request_status))
+        .route("/api/security", get(security_status).post(security_change))
+        .route("/api/journal", get(request_journal))
+        .route("/api/requests/{id}/assign", post(assign_request))
         .route("/api/requests/{id}/arrive", post(dispatcher_request_arrive))
         .route("/api/requests/{id}/start", post(dispatcher_request_start))
         .route(
@@ -364,7 +401,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/chat/rooms/{id}/read", post(mark_chat_read))
         .route(
             "/api/chat/rooms/{id}/attachments",
-            post(upload_chat_attachment).layer(DefaultBodyLimit::max(CHAT_ATTACHMENT_LIMIT as usize)),
+            post(upload_chat_attachment)
+                .layer(DefaultBodyLimit::max(CHAT_ATTACHMENT_LIMIT as usize)),
         )
         .route("/api/chat/attachments/{id}", get(download_chat_attachment))
         .route("/api/calls/relay", post(relay_call_signal))
@@ -380,15 +418,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .fallback(get(frontend_asset))
         .layer(
             CorsLayer::new()
-                .allow_origin(AllowOrigin::list([
-                    HeaderValue::from_static("http://tauri.localhost"),
-                    HeaderValue::from_static("https://tauri.localhost"),
-                    HeaderValue::from_static("tauri://localhost"),
-                    HeaderValue::from_static("http://localhost:5173"),
-                    HeaderValue::from_static("http://127.0.0.1:5173"),
-                ]))
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    let origin = origin.to_str().unwrap_or_default();
+                    let dynamic_loopback_origin = ["http://127.0.0.1:", "http://localhost:"]
+                        .iter()
+                        .any(|prefix| origin.strip_prefix(prefix).is_some_and(|port| {
+                            !port.is_empty() && port.parse::<u16>().is_ok_and(|port| port != 0)
+                        }));
+                    dynamic_loopback_origin
+                        || ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"].contains(&origin)
+                }))
                 .allow_credentials(true)
-                .allow_methods(AllowMethods::list([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]))
+                .allow_methods(AllowMethods::list([
+                    Method::GET,
+                    Method::POST,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ]))
                 .allow_headers(AllowHeaders::list([
                     header::ACCEPT,
                     header::AUTHORIZATION,
@@ -404,9 +450,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut persist_counter = 0_u8;
+        let mut aircraft_statuses = std::collections::HashMap::<i64, String>::new();
         loop {
             ticker.tick().await;
             if let Ok(Some(payload)) = tick_engine.tick(1.0) {
+                for aircraft in payload["aircraft"].as_array().into_iter().flatten() {
+                    let Some(id) = aircraft["id"].as_i64() else { continue };
+                    let status = aircraft["status"].as_str().unwrap_or_default().to_owned();
+                    if aircraft_statuses.get(&id) != Some(&status) {
+                        let event = if status == "parked" && aircraft_statuses.contains_key(&id) {
+                            "aircraft_arrived"
+                        } else { "aircraft_state" };
+                        let key = format!("aircraft:{id}:{}", now_rfc3339());
+                        if let Err(error) = tick_store.append_audit(&key, None, event,
+                            &json!({"aircraft":aircraft,"sim_time":payload["sim_time"]})) {
+                            eprintln!("Could not persist aircraft audit: {error}");
+                        } else { aircraft_statuses.insert(id, status); }
+                    }
+                }
                 persist_counter = persist_counter.wrapping_add(1);
                 if persist_counter >= 5 {
                     persist_counter = 0;
@@ -524,7 +585,11 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
     let route = match uri.path() {
         "/" => "index.html",
         "/login" | "/engineer" if !state.frontend_dir.join("assets").is_dir() => {
-            if uri.path() == "/login" { "auth.html" } else { "engineer.html" }
+            if uri.path() == "/login" {
+                "auth.html"
+            } else {
+                "engineer.html"
+            }
         }
         path if path.starts_with("/static/") => path.trim_start_matches("/static/"),
         path => path.trim_start_matches('/'),
@@ -584,17 +649,15 @@ async fn frontend_asset(State(state): State<AppState>, uri: axum::http::Uri) -> 
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response
-        .headers_mut()
-        .insert(
-            header::CACHE_CONTROL,
-            // Vite emits content-hashed files under /assets: safe to cache forever.
-            HeaderValue::from_static(if relative.starts_with("assets") {
-                "public, max-age=31536000, immutable"
-            } else {
-                "no-cache"
-            }),
-        );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        // Vite emits content-hashed files under /assets: safe to cache forever.
+        HeaderValue::from_static(if relative.starts_with("assets") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        }),
+    );
     response
 }
 
@@ -609,11 +672,15 @@ async fn meta(State(state): State<AppState>) -> Json<serde_json::Value> {
         "features": { "server_chat": true, "versioned_events": true, "airport_state_v1": true, "native_client_token_auth": true, "open_meteo_weather": true, "engineer_live_location": true, "local_geojson_map": true },
         "maps": { "provider": "LOCAL_GEOJSON", "configured": true, "offline": true },
         "demo": { "enabled": state.demo_mode },
-        "airport": { "name": state.airport_name, "source": "SVO / Шереметьево" },
+        "airport": { "name": state.airport_name, "source": state.airport_data.get("source").and_then(serde_json::Value::as_str).unwrap_or("RampPulse") },
         "quals": ["Планер", "Двигатель", "Авионика"],
         "types": ["A320", "A330", "A350", "B737", "B777", "B787", "SSJ-100", "MC-21"],
         "bases": bases,
     });
+    let store = state.store.clone();
+    if let Ok(Ok(quals)) = task::spawn_blocking(move || store.qualifications()).await {
+        value["quals"] = json!(quals);
+    }
     // Credentials are returned only for an explicitly enabled local/contest demo, never in
     // a normal server configuration. Production clients must not discover account secrets.
     if state.demo_mode {
@@ -630,26 +697,14 @@ async fn meta(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn airport(State(state): State<AppState>) -> Json<serde_json::Value> {
     let mut data = (*state.airport_data).clone();
     if let Some(object) = data.as_object_mut() {
-        object.entry("geo").or_insert_with(|| json!({
-            "iata": "SVO", "icao": "UUEE", "latitude": 55.97278, "longitude": 37.41472,
-            "elevation_m": 190, "coordinate_source": "Sheremetyevo Airport (SVO/UUEE)"
-        }));
+        object.entry("geo").or_insert_with(|| {
+            json!({
+                "iata": "VDN", "icao": "VDNH", "latitude": 55.8330053, "longitude": 37.628713,
+                "elevation_m": 0, "coordinate_source": "IT2026 VDNH GeoJSON"
+            })
+        });
     }
     Json(data)
-}
-
-async fn live_aircraft(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<WeatherQuery>,
-) -> Result<Json<aviation::LiveAircraftSnapshot>, HttpError> {
-    authenticated_user(&state, &headers).await?;
-    let snapshot = match (query.lat, query.lon) {
-        (Some(lat), Some(lon)) if lat.is_finite() && (-90.0..=90.0).contains(&lat) && lon.is_finite() && (-180.0..=180.0).contains(&lon) => state.aviation.snapshot_at(lat, lon).await,
-        (None, None) => state.aviation.snapshot().await,
-        _ => return Err(HttpError(StatusCode::BAD_REQUEST, "Aircraft coordinates are invalid.")),
-    };
-    Ok(Json(snapshot))
 }
 
 #[derive(Deserialize)]
@@ -666,46 +721,175 @@ async fn current_weather(
 ) -> Result<Json<weather::CurrentWeather>, HttpError> {
     authenticated_user(&state, &headers).await?;
     let (lat, lon) = match (query.lat, query.lon) {
-        (Some(lat), Some(lon)) if lat.is_finite() && (-90.0..=90.0).contains(&lat) && lon.is_finite() && (-180.0..=180.0).contains(&lon) => (Some(lat), Some(lon)),
+        (Some(lat), Some(lon))
+            if lat.is_finite()
+                && (-90.0..=90.0).contains(&lat)
+                && lon.is_finite()
+                && (-180.0..=180.0).contains(&lon) =>
+        {
+            (Some(lat), Some(lon))
+        }
         (None, None) => (None, None),
-        _ => return Err(HttpError(StatusCode::BAD_REQUEST, "Weather coordinates are invalid.")),
+        _ => {
+            return Err(HttpError(
+                StatusCode::BAD_REQUEST,
+                "Weather coordinates are invalid.",
+            ))
+        }
     };
-    Ok(Json(state.weather.current(lat, lon, query.refresh.unwrap_or(false)).await))
+    Ok(Json(
+        state
+            .weather
+            .current(lat, lon, query.refresh.unwrap_or(false))
+            .await,
+    ))
 }
 
 async fn update_engineer_location(
-    State(state): State<AppState>, headers: HeaderMap, Json(body): Json<EngineerLocationBody>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<EngineerLocationBody>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     if user.role != "engineer" || user.tech_id.is_none() {
-        return Err(HttpError(StatusCode::FORBIDDEN, "Live location sharing is for linked engineer accounts."));
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Live location sharing is for linked engineer accounts.",
+        ));
     }
     let tech_id = user.tech_id.unwrap();
     let key = tech_id;
     if !body.enabled {
-        state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?.remove(&key);
-        state.realtime.publish(EventKind::StateDelta, Audience::Role("dispatcher".into()), Some(ActorRef { user_id: user.id, role: user.role }), Some(EntityRef { kind: "technician_location".into(), id: tech_id.to_string(), version: 1 }), json!({"removed":true,"tech_id":tech_id}));
+        state.store.delete_field_position(tech_id).map_err(|_| {
+            HttpError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cannot stop location sharing",
+            )
+        })?;
+        state
+            .engineer_locations
+            .lock()
+            .map_err(|_| {
+                HttpError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Location service unavailable.",
+                )
+            })?
+            .remove(&key);
+        state.realtime.publish(
+            EventKind::StateDelta,
+            Audience::Role("dispatcher".into()),
+            Some(ActorRef {
+                user_id: user.id,
+                role: user.role,
+            }),
+            Some(EntityRef {
+                kind: "technician_location".into(),
+                id: tech_id.to_string(),
+                version: 1,
+            }),
+            json!({"removed":true,"tech_id":tech_id}),
+        );
         return Ok(Json(json!({"ok":true,"sharing":false})));
     }
-    if !user.on_shift { return Err(HttpError(StatusCode::CONFLICT, "Start your shift before sharing live location.")); }
-    let (Some(latitude), Some(longitude)) = (body.latitude, body.longitude) else { return Err(HttpError(StatusCode::BAD_REQUEST, "A GPS fix is required to share your location.")); };
+    if !user.on_shift {
+        return Err(HttpError(
+            StatusCode::CONFLICT,
+            "Start your shift before sharing live location.",
+        ));
+    }
+    let (Some(latitude), Some(longitude)) = (body.latitude, body.longitude) else {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "A GPS fix is required to share your location.",
+        ));
+    };
     let accuracy = body.accuracy.unwrap_or(1000.0);
-    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) || !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) || !accuracy.is_finite() || !(0.0..=100_000.0).contains(&accuracy) || body.heading.is_some_and(|v| !v.is_finite()) || body.speed.is_some_and(|v| !v.is_finite()) {
+    if !latitude.is_finite()
+        || !(-90.0..=90.0).contains(&latitude)
+        || !longitude.is_finite()
+        || !(-180.0..=180.0).contains(&longitude)
+        || !accuracy.is_finite()
+        || !(0.0..=100_000.0).contains(&accuracy)
+        || body.heading.is_some_and(|v| !v.is_finite())
+        || body.speed.is_some_and(|v| !v.is_finite())
+    {
         return Err(HttpError(StatusCode::BAD_REQUEST, "GPS fix is invalid."));
     }
-    let mut locations = state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?;
-    let mut track = locations.get(&key).map(|(last, _)| last.track.clone()).unwrap_or_default();
-    if track.last().map_or(true, |last| coordinate_distance_m(*last, [latitude, longitude]) >= 2.0) {
-        track.push([latitude, longitude]);
-        if track.len() > 120 { let excess = track.len() - 120; track.drain(..excess); }
+    let mut locations = state.engineer_locations.lock().map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Location service unavailable.",
+        )
+    })?;
+    let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let fix = field::Fix {
+        kind: "engineer".into(),
+        agent_id: tech_id.to_string(),
+        latitude,
+        longitude,
+        accuracy,
+        observed_ms: body.observed_ms.unwrap_or(now),
+    };
+    if !(now - 30_000..=now + 5_000).contains(&fix.observed_ms) {
+        state.store.append_audit(&format!("gps-error:{tech_id}:{now}"), None, "data_reception_error",
+            &json!({"tech_id":tech_id,"observed_ms":fix.observed_ms,"reason":"timestamp_out_of_range"}))
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка записи аудита"))?;
+
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Stale GPS fix"));
     }
-    let position = EngineerLocation { tech_id, user_id: user.id, name: user.name.clone(), latitude, longitude, accuracy,
-        heading: body.heading.filter(|v| *v >= 0.0 && *v <= 360.0), speed: body.speed.filter(|v| *v >= 0.0 && *v <= 1000.0),
-        updated_at_ms: (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64, track };
+    if !state
+        .store
+        .record_fix(&fix)
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "GPS storage unavailable"))?
+    {
+        return Ok(Json(json!({"ok":true,"accepted":false})));
+    }
+    field::apply_fix(&state, &fix, &user)?;
+    let mut track = locations
+        .get(&key)
+        .map(|(last, _)| last.track.clone())
+        .unwrap_or_default();
+    if track.last().map_or(true, |last| {
+        coordinate_distance_m(*last, [latitude, longitude]) >= 2.0
+    }) {
+        track.push([latitude, longitude]);
+        if track.len() > 120 {
+            let excess = track.len() - 120;
+            track.drain(..excess);
+        }
+    }
+    let position = EngineerLocation {
+        tech_id,
+        user_id: user.id,
+        name: user.name.clone(),
+        latitude,
+        longitude,
+        accuracy,
+        heading: body.heading.filter(|v| *v >= 0.0 && *v <= 360.0),
+        speed: body.speed.filter(|v| *v >= 0.0 && *v <= 1000.0),
+        updated_at_ms: (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as u64,
+        track,
+    };
     locations.insert(key, (position.clone(), std::time::Instant::now()));
     drop(locations);
-    state.realtime.publish(EventKind::StateDelta, Audience::Role("dispatcher".into()), Some(ActorRef { user_id: user.id, role: user.role }), Some(EntityRef { kind: "technician_location".into(), id: tech_id.to_string(), version: 1 }), serde_json::to_value(&position).unwrap_or(Value::Null));
-    Ok(Json(json!({"ok":true,"sharing":true,"updated_at_ms":position.updated_at_ms})))
+    state.realtime.publish(
+        EventKind::StateDelta,
+        Audience::Role("dispatcher".into()),
+        Some(ActorRef {
+            user_id: user.id,
+            role: user.role,
+        }),
+        Some(EntityRef {
+            kind: "technician_location".into(),
+            id: tech_id.to_string(),
+            version: 1,
+        }),
+        serde_json::to_value(&position).unwrap_or(Value::Null),
+    );
+    Ok(Json(
+        json!({"ok":true,"sharing":true,"updated_at_ms":position.updated_at_ms}),
+    ))
 }
 
 fn coordinate_distance_m(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -718,19 +902,35 @@ fn coordinate_distance_m(a: [f64; 2], b: [f64; 2]) -> f64 {
     6_371_000.0 * 2.0 * h.sqrt().atan2((1.0 - h).sqrt())
 }
 
-async fn engineer_locations(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<EngineerLocation>>, HttpError> {
+async fn engineer_locations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<EngineerLocation>>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     require_dispatcher(&user)?;
-    let mut locations = state.engineer_locations.lock().map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Location service unavailable."))?;
+    let mut locations = state.engineer_locations.lock().map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Location service unavailable.",
+        )
+    })?;
     locations.retain(|_, (_, updated)| updated.elapsed() < std::time::Duration::from_secs(45));
-    Ok(Json(locations.values().map(|(position, _)| position.clone()).collect()))
+    Ok(Json(
+        locations
+            .values()
+            .map(|(position, _)| position.clone())
+            .collect(),
+    ))
 }
 
 async fn state_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    let user = authenticated_user(&state, &headers).await?;
+    let user = session_user(&state, &headers).await?;
+    if user.role == "security" {
+        return Ok(Json(json!({"me":user})));
+    }
     let store = state.store.clone();
     let query_user = user.clone();
     let (requests, engineers, registrations) = task::spawn_blocking(move || {
@@ -750,7 +950,31 @@ async fn state_snapshot(
         )
     })?;
     let mut snapshot = state.engine.snapshot(&requests, &engineers, Some(&user));
+    if user.role == "dispatcher" {
+        let audit_store = state.store.clone();
+        let audit_requests = snapshot["active"].as_array().cloned().unwrap_or_default();
+        task::spawn_blocking(move || -> rusqlite::Result<()> {
+            for request in audit_requests {
+                let Some(id) = request["id"].as_i64() else { continue };
+                let version = request["version"].as_i64().unwrap_or(0);
+                if request["status"] == "waiting" {
+                    audit_store.append_audit(&format!("candidates:{id}:{version}"), Some(id), "candidates_formed",
+                        &json!({"candidates":request["candidates"],"duration_ms":request["candidate_generation_ms"],"stand":request["stand"],"qualification":request["qual"],"rejected":request["rejected_candidates"]}))?;
+                }
+                if request["status"] == "enroute" || request["status"] == "assigned" {
+                    audit_store.append_audit(&format!("route:{id}:{version}"), Some(id), "route_built",
+                        &json!({"tech_id":request["tech_id"],"eta_seconds":request["eta"],"mode":request["travel_mode"],"via":request["via"],"available":request["route_available"]}))?;
+                }
+            }
+            Ok(())
+        }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка записи аудита"))?
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка записи аудита"))?;
+    }
     snapshot["me"] = serde_json::to_value(&user).unwrap_or(serde_json::Value::Null);
+    snapshot["carpet"] = json!(state
+        .store
+        .carpet_active()
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка режима доступа"))?);
     snapshot["registrations"] =
         serde_json::to_value(registrations).unwrap_or_else(|_| serde_json::json!([]));
     Ok(Json(snapshot))
@@ -765,7 +989,7 @@ async fn update_simulation(
     require_dispatcher(&user)?;
     let result = state
         .engine
-        .set_sim(body.speed, body.running)
+        .set_sim(body.speed, body.running, body.spawn_at_terminal)
         .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "Недопустимая скорость симуляции"))?;
     state.realtime.publish(
         EventKind::StateDelta,
@@ -803,6 +1027,9 @@ async fn set_edge_blocked(
     } else {
         EventKind::RouteCleared
     };
+    state.store.append_audit(&format!("edge:{}:{}", edge_id, now_rfc3339()), None, "route_recalculated",
+        &json!({"edge_id":edge_id,"blocked":body.blocked,"actor_id":user.id}))
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка записи аудита"))?;
     state.realtime.publish(
         kind,
         Audience::Role("dispatcher".into()),
@@ -1029,7 +1256,12 @@ async fn reset_simulation(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     require_dispatcher(&user)?;
-    state.engine.reset().map_err(|_| { HttpError(StatusCode::INTERNAL_SERVER_ERROR, "?? ??????? ???????? ?????????") })?;
+    state.engine.reset().map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "?? ??????? ???????? ?????????",
+        )
+    })?;
     state.realtime.publish(
         EventKind::StateSnapshot,
         Audience::Role("dispatcher".into()),
@@ -1053,6 +1285,16 @@ async fn route_preview(
     Json(body): Json<RoutePreviewBody>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let _user = authenticated_user(&state, &headers).await?;
+    if state
+        .store
+        .carpet_active()
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка режима доступа"))?
+    {
+        return Err(HttpError(
+            StatusCode::LOCKED,
+            "План Ковёр: движение закрыто",
+        ));
+    }
     let mut blocked_edges = body.blocked_edges;
     blocked_edges.extend(state.engine.blocked_edges().map_err(|_| {
         HttpError(
@@ -1060,9 +1302,18 @@ async fn route_preview(
             "Не удалось прочитать состояние маршрутов",
         )
     })?);
+    if body.via.len() > 32 {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Не более 32 остановок"));
+    }
     let route = state
         .airport_graph
-        .shortest_path(&body.from, &body.to, &blocked_edges)
+        .journey(
+            &body.from,
+            &body.via,
+            &body.to,
+            &blocked_edges,
+            body.vehicle_available,
+        )
         .ok_or(HttpError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Маршрут не найден",
@@ -1079,7 +1330,8 @@ async fn route_preview(
     Ok(Json(serde_json::json!({
         "nodes": route.nodes,
         "points": points,
-        "cost": route.cost,
+        "cost": (route.distance_m * 1000.0).round() as u64,
+        "distance_m": route.distance_m, "eta_seconds": route.eta_seconds, "mode": route.mode,
     })))
 }
 
@@ -1125,44 +1377,54 @@ async fn create_request(
     }
     // ТЗ: квалификация определяется по описанию неисправности, если диспетчер её не задал.
     let mut body = body;
-    if body.qual.trim().is_empty() || body.qual.trim().eq_ignore_ascii_case("auto") {
-        body.qual = classify_qualification(&format!("{} {}", body.description, body.extra)).to_owned();
+    if body.via.len() > 32
+        || body
+            .via
+            .iter()
+            .any(|node| state.airport_graph.node(node).is_none())
+    {
+        return Err(HttpError(StatusCode::BAD_REQUEST, "Недопустимая остановка"));
     }
-    let read_store = state.store.clone();
-    let engineers = task::spawn_blocking(move || read_store.active_engineers())
-        .await
-        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-        .map_err(|_| {
-            HttpError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Не удалось загрузить инженеров",
-            )
-        })?;
-    let ranked_technicians =
-        state
-            .engine
-            .rank_technicians(body.stand.trim(), body.qual.trim(), &engineers);
-    if body.tech_id.is_some_and(|id| !ranked_technicians.iter().any(|(candidate, _)| *candidate == id)) {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Выбранный инженер не на смене, не подходит по квалификации или недоступен по маршруту"));
+    if body.qual.trim().is_empty() || body.qual.trim().eq_ignore_ascii_case("auto") {
+        body.qual =
+            classify_qualification(&format!("{} {}", body.description, body.extra)).to_owned();
+    }
+    if body.tech_id.is_some() {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Сначала создайте заявку, затем назначьте инженера",
+        ));
     }
     let store = state.store.clone();
     let requested_tech_id = body.tech_id;
+    let request_actor = actor.clone();
     let request = task::spawn_blocking(move || {
         store.create_request(
             NewRequest {
+                via: body.via,
+                actor_id: request_actor.id,
+                actor_role: request_actor.role,
                 stand: body.stand.trim().to_owned(),
                 description: body.description.trim().to_owned(),
                 qual: body.qual.trim().to_owned(),
                 extra: body.extra.trim().to_owned(),
                 priority: body.priority,
             },
-            &ranked_technicians,
-            requested_tech_id,
+            0,
         )
     })
     .await
     .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-.map_err(|_| if requested_tech_id.is_some() { HttpError(StatusCode::CONFLICT, "Engineer became unavailable; refresh and retry") } else { HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Request creation failed") })?;
+    .map_err(|_| {
+        if requested_tech_id.is_some() {
+            HttpError(
+                StatusCode::CONFLICT,
+                "Engineer became unavailable; refresh and retry",
+            )
+        } else {
+            HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Request creation failed")
+        }
+    })?;
     let payload = serde_json::to_value(&request).unwrap_or(serde_json::Value::Null);
     state.realtime.publish(
         EventKind::RequestCreated,
@@ -1206,15 +1468,152 @@ async fn create_request(
     );
     if let Some(tech_id) = request.tech_id {
         let store = state.store.clone();
-        let recipient = task::spawn_blocking(move || store.engineer_user_id(tech_id)).await
-            .ok().and_then(Result::ok).flatten();
+        let recipient = task::spawn_blocking(move || store.engineer_user_id(tech_id))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
         if let Some(recipient) = recipient {
-            push_user(&state, recipient, "Новая заявка RampPulse", &format!("{} · {}", request.stand, request.description), json!({"kind":"request","request_id":request.id}));
+            push_user(
+                &state,
+                recipient,
+                "Новая заявка RampPulse",
+                &format!("{} · {}", request.stand, request.description),
+                json!({"kind":"request","request_id":request.id}),
+            );
         }
     }
     Ok(Json(
         serde_json::json!({ "id": request.id, "status": request.status, "request": request }),
     ))
+}
+
+#[derive(Deserialize)]
+struct SecurityChange {
+    device: Option<String>,
+    enabled: bool,
+}
+
+async fn security_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = session_user(&state, &headers).await?;
+    if user.role != "security" {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Доступ только службе безопасности",
+        ));
+    }
+    let store = state.store.clone();
+    let data = task::spawn_blocking(move || store.security_status())
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка базы"))?;
+    Ok(Json(data))
+}
+
+async fn security_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SecurityChange>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = session_user(&state, &headers).await?;
+    if user.role != "security" {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Доступ только службе безопасности",
+        ));
+    }
+    let token = session_from_headers(&headers)
+        .ok_or(HttpError(StatusCode::UNAUTHORIZED, "Требуется вход"))?;
+    let store = state.store.clone();
+    task::spawn_blocking(move || store.security_change(user.id, body.device, body.enabled, &token))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::CONFLICT, "Изменение запрещено"))?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn request_journal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_dispatcher(&authenticated_user(&state, &headers).await?)?;
+    let store = state.store.clone();
+    let rows = task::spawn_blocking(move || store.journal())
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка журнала"))?;
+    Ok(Json(
+        json!({"columns":["Время UTC","Заявка","Пользователь","Роль","Событие","Из статуса","В статус","Детали"],"rows":rows}),
+    ))
+}
+
+async fn assign_request(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(body): Json<RequestAssignBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let actor = authenticated_user(&state, &headers).await?;
+    require_dispatcher(&actor)?;
+    let store = state.store.clone();
+    let assignment_actor = actor.clone();
+    let request = task::spawn_blocking(move || {
+        store.assign_request(id, body.tech_id, &assignment_actor, body.confirm_reassignment)
+    })
+    .await
+    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+    .map_err(|_| {
+        HttpError(
+            StatusCode::CONFLICT,
+            "Engineer unavailable or request cannot be reassigned",
+        )
+    })?;
+    let payload = serde_json::to_value(&request).unwrap_or(Value::Null);
+    let entity = Some(EntityRef {
+        kind: "request".into(),
+        id: request.id.to_string(),
+        version: request.version as u64,
+    });
+    let announcement_store = state.store.clone();
+    let announcement_actor = actor.clone();
+    let announcement_body = format!("Назначение заявки №{}: {} → {}. {}", request.id, request.tech_name, request.stand, request.description);
+    let announcement = task::spawn_blocking(move || {
+        let room = announcement_store.chat_rooms(&announcement_actor)?.into_iter().find(|room| room.kind == "shift")
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let message = announcement_store.chat_messages(room.id, &announcement_actor, 100)?.into_iter()
+            .rev().find(|message| message.body == announcement_body && message.sender_id == announcement_actor.id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let recipients = announcement_store.chat_recipients(room.id, announcement_actor.id)?;
+        Ok::<_, rusqlite::Error>((message, recipients))
+    }).await;
+    if let Ok(Ok((message, recipients))) = announcement {
+        for recipient in recipients {
+            state.realtime.publish(EventKind::ChatMessageCreated, Audience::User(recipient),
+                Some(ActorRef { user_id: actor.id, role: actor.role.clone() }),
+                Some(EntityRef { kind: "chat_message".into(), id: message.id.to_string(), version: 1 }),
+                serde_json::to_value(&message).unwrap_or(Value::Null));
+        }
+    }
+    let event_actor = Some(ActorRef { user_id: actor.id, role: actor.role });
+    state.realtime.publish(
+        EventKind::RequestAssigned, Audience::Role("dispatcher".into()),
+        event_actor.clone(), entity.clone(), payload.clone(),
+    );
+    let store = state.store.clone();
+    let tech_id = request.tech_id.unwrap_or(body.tech_id);
+    if let Ok(Ok(Some(user_id))) = task::spawn_blocking(move || store.engineer_user_id(tech_id)).await {
+        state.realtime.publish(
+            EventKind::RequestAssigned, Audience::User(user_id),
+            event_actor, entity, payload,
+        );
+        push_user(&state, user_id, "У вас новая заявка",
+            &format!("Заявка №{} · {}", request.id, request.stand),
+            json!({"kind":"request","request_id":request.id}));
+    }
+    Ok(Json(serde_json::json!({"request": request})))
 }
 
 async fn change_request_status(
@@ -1227,17 +1626,19 @@ async fn change_request_status(
     let store = state.store.clone();
     let operation_actor = actor.clone();
     let next_status = body.status;
-    let request =
-        task::spawn_blocking(move || store.transition_request(id, &next_status, &operation_actor))
-            .await
-            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-            .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => HttpError(
-                    StatusCode::NOT_FOUND,
-                    "Заявка не найдена или назначена другому инженеру",
-                ),
-                _ => HttpError(StatusCode::CONFLICT, "Недопустимый переход статуса заявки"),
-            })?;
+    let confirmed = body.confirm_shift_lead;
+    let request = task::spawn_blocking(move || {
+        store.transition_request_with_confirmation(id, &next_status, &operation_actor, confirmed)
+    })
+    .await
+    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => HttpError(
+            StatusCode::NOT_FOUND,
+            "Заявка не найдена или назначена другому инженеру",
+        ),
+        _ => HttpError(StatusCode::CONFLICT, "Недопустимый переход статуса заявки"),
+    })?;
     let kind = if request.status == "done" {
         EventKind::RequestCompleted
     } else {
@@ -1360,6 +1761,7 @@ async fn legacy_request_status(
         headers,
         Json(RequestStatusBody {
             status: status.into(),
+            confirm_shift_lead: false,
         }),
     )
     .await
@@ -1570,7 +1972,21 @@ async fn send_chat_message(
             }),
             payload.clone(),
         );
-        push_user(&state, recipient, if message.kind == "voice" { "Голосовое сообщение RampPulse" } else { "Сообщение RampPulse" }, if message.kind == "text" { &message.body } else { &message.content }, json!({"kind":"chat","room_id":room_id,"message_id":message.id}));
+        push_user(
+            &state,
+            recipient,
+            if message.kind == "voice" {
+                "Голосовое сообщение RampPulse"
+            } else {
+                "Сообщение RampPulse"
+            },
+            if message.kind == "text" {
+                &message.body
+            } else {
+                &message.content
+            },
+            json!({"kind":"chat","room_id":room_id,"message_id":message.id}),
+        );
     }
     Ok(Json(serde_json::json!({"message":message})))
 }
@@ -1784,7 +2200,17 @@ async fn upload_chat_attachment(
             }),
             payload.clone(),
         );
-        push_user(&state, recipient, if message.kind == "voice" { "Голосовое сообщение RampPulse" } else { "Вложение RampPulse" }, &message.content, json!({"kind":"chat","room_id":room_id,"message_id":message.id}));
+        push_user(
+            &state,
+            recipient,
+            if message.kind == "voice" {
+                "Голосовое сообщение RampPulse"
+            } else {
+                "Вложение RampPulse"
+            },
+            &message.content,
+            json!({"kind":"chat","room_id":room_id,"message_id":message.id}),
+        );
     }
     Ok(Json(serde_json::json!({"message":message})))
 }
@@ -1878,25 +2304,91 @@ fn normalized_upload_type(supplied: &str, file_name: &str) -> Option<String> {
         .unwrap_or("")
         .to_ascii_lowercase();
     let inferred = match extension.as_str() {
-        "jpg" | "jpeg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", "bmp" => "image/bmp", "tif" | "tiff" => "image/tiff",
-        "pdf" => "application/pdf", "txt" | "log" => "text/plain", "md" => "text/markdown", "csv" => "text/csv", "json" => "application/json", "xml" => "application/xml",
-        "zip" => "application/zip", "7z" => "application/x-7z-compressed", "rar" => "application/vnd.rar", "tar" => "application/x-tar", "gz" => "application/gzip",
-        "doc" => "application/msword", "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "odt" => "application/vnd.oasis.opendocument.text",
-        "xls" => "application/vnd.ms-excel", "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "ods" => "application/vnd.oasis.opendocument.spreadsheet",
-        "ppt" => "application/vnd.ms-powerpoint", "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation", "odp" => "application/vnd.oasis.opendocument.presentation",
-        "webm" => "audio/webm", "ogg" | "oga" => "audio/ogg", "mp3" => "audio/mpeg", "m4a" => "audio/mp4", "wav" => "audio/wav", "aac" => "audio/aac", "flac" => "audio/flac",
-        "mpg" | "mpeg" => "video/mpeg", "mov" => "video/quicktime", "mkv" => "video/x-matroska", "avi" => "video/x-msvideo", "mp4" => "video/mp4",
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "odp" => "application/vnd.oasis.opendocument.presentation",
+        "webm" => "audio/webm",
+        "ogg" | "oga" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "wav" => "audio/wav",
+        "aac" => "audio/aac",
+        "flac" => "audio/flac",
+        "mpg" | "mpeg" => "video/mpeg",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "mp4" => "video/mp4",
         _ => "",
     };
-    let allowed = matches!(supplied.as_str(),
-        "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/bmp" | "image/tiff" |
-        "application/pdf" | "text/plain" | "text/markdown" | "text/csv" | "application/json" | "application/xml" | "text/xml" |
-        "application/zip" | "application/x-7z-compressed" | "application/vnd.rar" | "application/x-rar-compressed" | "application/x-tar" | "application/gzip" | "application/x-gzip" |
-        "application/msword" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.oasis.opendocument.text" |
-        "application/vnd.ms-excel" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.oasis.opendocument.spreadsheet" |
-        "application/vnd.ms-powerpoint" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "application/vnd.oasis.opendocument.presentation" |
-        "audio/webm" | "audio/ogg" | "audio/mpeg" | "audio/mp4" | "audio/wav" | "audio/aac" | "audio/flac" |
-        "video/mpeg" | "video/quicktime" | "video/x-matroska" | "video/x-msvideo" | "video/webm" | "video/mp4");
+    let allowed = matches!(
+        supplied.as_str(),
+        "image/jpeg"
+            | "image/png"
+            | "image/webp"
+            | "image/gif"
+            | "image/bmp"
+            | "image/tiff"
+            | "application/pdf"
+            | "text/plain"
+            | "text/markdown"
+            | "text/csv"
+            | "application/json"
+            | "application/xml"
+            | "text/xml"
+            | "application/zip"
+            | "application/x-7z-compressed"
+            | "application/vnd.rar"
+            | "application/x-rar-compressed"
+            | "application/x-tar"
+            | "application/gzip"
+            | "application/x-gzip"
+            | "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.oasis.opendocument.text"
+            | "application/vnd.ms-excel"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.oasis.opendocument.spreadsheet"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.oasis.opendocument.presentation"
+            | "audio/webm"
+            | "audio/ogg"
+            | "audio/mpeg"
+            | "audio/mp4"
+            | "audio/wav"
+            | "audio/aac"
+            | "audio/flac"
+            | "video/mpeg"
+            | "video/quicktime"
+            | "video/x-matroska"
+            | "video/x-msvideo"
+            | "video/webm"
+            | "video/mp4"
+    );
     let media = if allowed { supplied.as_str() } else { inferred };
     (!media.is_empty()).then(|| media.to_owned())
 }
@@ -2029,16 +2521,34 @@ async fn relay_call_signal(
     if !payload.contains_key("call_id") {
         payload.insert("call_id".into(), serde_json::json!(""));
     }
-    let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let call_id = payload
+        .get("call_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
     if signal_kind == "invite" && !call_id.is_empty() {
-        let store = state.store.clone(); let data = serde_json::Value::Object(payload.clone());
-        let caller = actor.id; let recipient = body.recipient_id; let save_id = call_id.clone();
-        task::spawn_blocking(move || store.save_call_invite(&save_id, caller, recipient, &data)).await
+        let store = state.store.clone();
+        let data = serde_json::Value::Object(payload.clone());
+        let caller = actor.id;
+        let recipient = body.recipient_id;
+        let save_id = call_id.clone();
+        task::spawn_blocking(move || store.save_call_invite(&save_id, caller, recipient, &data))
+            .await
             .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить вызов"))?;
-    } else if matches!(signal_kind,"answer"|"reject"|"decline"|"hangup"|"busy") && !call_id.is_empty() {
-        let store=state.store.clone(); let clear_id=call_id.clone();
-        let _=task::spawn_blocking(move || store.clear_call_invite(&clear_id)).await;
+            .map_err(|_| {
+                HttpError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Не удалось сохранить вызов",
+                )
+            })?;
+    } else if matches!(
+        signal_kind,
+        "answer" | "reject" | "decline" | "hangup" | "busy"
+    ) && !call_id.is_empty()
+    {
+        let store = state.store.clone();
+        let clear_id = call_id.clone();
+        let _ = task::spawn_blocking(move || store.clear_call_invite(&clear_id)).await;
     }
     state.realtime.publish(
         kind,
@@ -2051,43 +2561,113 @@ async fn relay_call_signal(
         serde_json::Value::Object(payload),
     );
     if signal_kind == "invite" {
-        push_user(&state, body.recipient_id, "Входящий вызов RampPulse", &actor.name, json!({"kind":"call","call_id":call_id,"from_user_id":actor.id,"from_name":actor.name}));
+        push_user(
+            &state,
+            body.recipient_id,
+            "Входящий вызов RampPulse",
+            &actor.name,
+            json!({"kind":"call","call_id":call_id,"from_user_id":actor.id,"from_name":actor.name}),
+        );
     }
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
-async fn register_push_device(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<PushDeviceBody>) -> Result<Json<serde_json::Value>, HttpError> {
-    let user=authenticated_user(&state,&headers).await?; let token=body.token.trim().to_owned();
-    if token.len()<32 || token.len()>4096 || token.chars().any(char::is_whitespace) { return Err(HttpError(StatusCode::BAD_REQUEST,"Некорректный токен устройства")); }
-    let store=state.store.clone();
-    task::spawn_blocking(move || store.register_push_device(user.id,&token)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Не удалось зарегистрировать устройство"))?;
+async fn register_push_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PushDeviceBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let token = body.token.trim().to_owned();
+    if token.len() < 32 || token.len() > 4096 || token.chars().any(char::is_whitespace) {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Некорректный токен устройства",
+        ));
+    }
+    let store = state.store.clone();
+    task::spawn_blocking(move || store.register_push_device(user.id, &token))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| {
+            HttpError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Не удалось зарегистрировать устройство",
+            )
+        })?;
     Ok(Json(json!({"ok":true,"push_enabled":state.push.is_some()})))
 }
 
-async fn push_status(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, HttpError> {
+async fn push_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
     let _user = authenticated_user(&state, &headers).await?;
     Ok(Json(json!({"enabled": state.push.is_some()})))
 }
 
-async fn unregister_push_device(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<PushDeviceBody>) -> Result<Json<serde_json::Value>, HttpError> {
-    let user=authenticated_user(&state,&headers).await?; let token=body.token;
-    let store=state.store.clone();
-    task::spawn_blocking(move || store.unregister_push_device(user.id,&token)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?;
+async fn unregister_push_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PushDeviceBody>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let token = body.token;
+    let store = state.store.clone();
+    task::spawn_blocking(move || store.unregister_push_device(user.id, &token))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
     Ok(Json(json!({"ok":true})))
 }
 
-async fn pending_call_invites(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, HttpError> {
-    let user=authenticated_user(&state,&headers).await?; let store=state.store.clone();
-    let invites=task::spawn_blocking(move || store.pending_call_invites(user.id)).await.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?.map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Не удалось загрузить вызовы"))?;
+async fn pending_call_invites(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    let store = state.store.clone();
+    let invites = task::spawn_blocking(move || store.pending_call_invites(user.id))
+        .await
+        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+        .map_err(|_| {
+            HttpError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Не удалось загрузить вызовы",
+            )
+        })?;
     Ok(Json(json!({"invites":invites})))
 }
 
 fn push_user(state: &AppState, user_id: i64, title: &str, body: &str, data: serde_json::Value) {
-    let Some(push)=state.push.clone() else { return; }; let store=state.store.clone(); let cleanup_store=state.store.clone();
-    let title=title.to_owned(); let body=body.to_owned();
+    let Some(push) = state.push.clone() else {
+        return;
+    };
+    let store = state.store.clone();
+    let cleanup_store = state.store.clone();
+    let title = title.to_owned();
+    let body = body.to_owned();
     tokio::spawn(async move {
-        let Ok(Ok(tokens))=task::spawn_blocking(move || store.push_tokens(user_id)).await else { return; };
-        for token in tokens { let push=push.clone(); let title=title.clone(); let body=body.clone(); let data=data.clone(); let cleanup=cleanup_store.clone(); tokio::spawn(async move { if let Err(e)=push.send(&token,&title,&body,data).await { if e.contains("UNREGISTERED") || e.contains("NOT_FOUND") { let _=task::spawn_blocking(move || cleanup.remove_push_device(&token)).await; } else { eprintln!("RampPulse push delivery failed: {e}"); } } }); }
+        let Ok(Ok(tokens)) = task::spawn_blocking(move || store.push_tokens(user_id)).await else {
+            return;
+        };
+        for token in tokens {
+            let push = push.clone();
+            let title = title.clone();
+            let body = body.clone();
+            let data = data.clone();
+            let cleanup = cleanup_store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = push.send(&token, &title, &body, data).await {
+                    if e.contains("UNREGISTERED") || e.contains("NOT_FOUND") {
+                        let _ =
+                            task::spawn_blocking(move || cleanup.remove_push_device(&token)).await;
+                    } else {
+                        eprintln!("RampPulse push delivery failed: {e}");
+                    }
+                }
+            });
+        }
     });
 }
 
@@ -2133,15 +2713,17 @@ async fn livekit_token(
     Json(body): Json<LiveKitTokenBody>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let actor = authenticated_user(&state, &headers).await?;
-    let call_id = Uuid::parse_str(body.call_id.trim()).map_err(|_| {
-        HttpError(StatusCode::BAD_REQUEST, "Некорректный идентификатор звонка")
-    })?;
+    let call_id = Uuid::parse_str(body.call_id.trim())
+        .map_err(|_| HttpError(StatusCode::BAD_REQUEST, "Некорректный идентификатор звонка"))?;
     let (Some(url), Some(api_key), Some(api_secret)) = (
         state.livekit_url.as_deref(),
         state.livekit_api_key.as_deref(),
         state.livekit_api_secret.as_deref(),
     ) else {
-        return Err(HttpError(StatusCode::SERVICE_UNAVAILABLE, "Сервис голосовой связи не настроен"));
+        return Err(HttpError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Сервис голосовой связи не настроен",
+        ));
     };
     let room = format!("rp-{}", call_id.simple());
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -2162,11 +2744,17 @@ async fn livekit_token(
         }
     });
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).map_err(|_| {
-        HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось подготовить токен связи")
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Не удалось подготовить токен связи",
+        )
     })?);
     let signing_input = format!("{header}.{payload}");
     let mut mac = Hmac::<Sha256>::new_from_slice(api_secret.as_bytes()).map_err(|_| {
-        HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка конфигурации связи")
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ошибка конфигурации связи",
+        )
     })?;
     mac.update(signing_input.as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
@@ -2194,10 +2782,15 @@ async fn login(
             }
         }
     }
-    let result =
-        task::spawn_blocking(move || store.authenticate_and_create_session(&email, &password))
-            .await
-            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
+    let result = task::spawn_blocking(move || {
+        store.authenticate_and_create_session(
+            &email,
+            &password,
+            body.device_id.map(|id| id.to_string()),
+        )
+    })
+    .await
+    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
     {
         let mut guard = state.login_guard.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
@@ -2208,7 +2801,11 @@ async fn login(
                 locked_until: None,
             });
             if now.duration_since(entry.window_start) > LOGIN_WINDOW {
-                *entry = LoginAttempts { failures: 0, window_start: now, locked_until: None };
+                *entry = LoginAttempts {
+                    failures: 0,
+                    window_start: now,
+                    locked_until: None,
+                };
             }
             entry.failures += 1;
             if entry.failures >= LOGIN_MAX_FAILURES {
@@ -2223,27 +2820,33 @@ async fn login(
             guard.retain(|_, a| now.duration_since(a.window_start) < LOGIN_WINDOW);
         }
     }
-    let (user, token) = result.map_err(|error| match error {
-                store::AuthFailure::InvalidCredentials => {
-                    HttpError(StatusCode::UNAUTHORIZED, "Неверный логин или пароль")
-                }
-                store::AuthFailure::Pending => HttpError(
-                    StatusCode::FORBIDDEN,
-                    "Заявка на регистрацию ещё не подтверждена диспетчером",
-                ),
-                store::AuthFailure::Closed => HttpError(
-                    StatusCode::FORBIDDEN,
-                    "Доступ к аккаунту закрыт. Обратитесь к диспетчеру",
-                ),
-                store::AuthFailure::Storage => {
-                    HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера")
-                }
-            })?;
+    let (mut user, token) = result.map_err(|error| match error {
+        store::AuthFailure::InvalidCredentials => {
+            HttpError(StatusCode::UNAUTHORIZED, "Неверный логин или пароль")
+        }
+        store::AuthFailure::Pending => HttpError(
+            StatusCode::FORBIDDEN,
+            "Заявка на регистрацию ещё не подтверждена диспетчером",
+        ),
+        store::AuthFailure::Closed => HttpError(
+            StatusCode::FORBIDDEN,
+            "Доступ к аккаунту закрыт. Обратитесь к диспетчеру",
+        ),
+        store::AuthFailure::Storage => {
+            HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера")
+        }
+    })?;
 
+    apply_security_role(&mut user);
     let max_age = SESSION_TTL_SECONDS;
-    let (same_site, secure) = if state.cookie_secure { ("None", "; Secure") } else { ("Lax", "") };
-    let cookie =
-        format!("{COOKIE_NAME}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite={same_site}{secure}");
+    let (same_site, secure) = if state.cookie_secure {
+        ("None", "; Secure")
+    } else {
+        ("Lax", "")
+    };
+    let cookie = format!(
+        "{COOKIE_NAME}={token}; Path=/; Max-Age={max_age}; HttpOnly; SameSite={same_site}{secure}"
+    );
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -2267,15 +2870,7 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    let token = session_from_headers(&headers).ok_or(HttpError(
-        StatusCode::UNAUTHORIZED,
-        "Требуется вход в систему",
-    ))?;
-    let store = state.store.clone();
-    let user = task::spawn_blocking(move || store.user_for_token(&token))
-        .await
-        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-        .map_err(|_| HttpError(StatusCode::UNAUTHORIZED, "Требуется вход в систему"))?;
+    let user = session_user(&state, &headers).await?;
     Ok(Json(serde_json::json!({ "user": user })))
 }
 
@@ -2343,8 +2938,13 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
             .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
             .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?;
     }
-    let (same_site, secure) = if state.cookie_secure { ("None", "; Secure") } else { ("Lax", "") };
-    let cookie = format!("{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite={same_site}{secure}");
+    let (same_site, secure) = if state.cookie_secure {
+        ("None", "; Secure")
+    } else {
+        ("Lax", "")
+    };
+    let cookie =
+        format!("{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite={same_site}{secure}");
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -2456,7 +3056,33 @@ async fn reject_registration(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+fn apply_security_role(user: &mut store::PublicUser) {
+    // Only a pre-provisioned active shift-lead account may be assigned this separate role.
+    if user.role == "dispatcher"
+        && std::env::var("RAMPPULSE_SECURITY_USER_IDS")
+            .unwrap_or_default()
+            .split(',')
+            .any(|v| v.trim().parse::<i64>() == Ok(user.id))
+    {
+        user.role = "security".to_owned();
+    }
+}
+
 async fn authenticated_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<store::PublicUser, HttpError> {
+    let user = session_user(state, headers).await?;
+    if user.role == "security" {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Используйте панель безопасности",
+        ));
+    }
+    Ok(user)
+}
+
+async fn session_user(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<store::PublicUser, HttpError> {
@@ -2465,10 +3091,12 @@ async fn authenticated_user(
         "Требуется вход в систему",
     ))?;
     let store = state.store.clone();
-    task::spawn_blocking(move || store.user_for_token(&token))
+    let mut user = task::spawn_blocking(move || store.user_for_token(&token))
         .await
         .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-        .map_err(|_| HttpError(StatusCode::UNAUTHORIZED, "Требуется вход в систему"))
+        .map_err(|_| HttpError(StatusCode::UNAUTHORIZED, "Требуется вход в систему"))?;
+    apply_security_role(&mut user);
+    Ok(user)
 }
 
 fn require_dispatcher(user: &store::PublicUser) -> Result<(), HttpError> {
@@ -2498,7 +3126,12 @@ async fn websocket(
     let offered_auth_protocol = headers
         .get("sec-websocket-protocol")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').map(str::trim).find(|protocol| protocol.starts_with("rp-auth.")))
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|protocol| protocol.starts_with("rp-auth."))
+        })
         .map(str::to_owned);
     let mut upgrade = ws
         .read_buffer_size(8 * 1024)
@@ -2521,9 +3154,14 @@ fn origin_is_same_site(headers: &HeaderMap) -> bool {
         // Native clients without browser Origin may authenticate with an explicit bearer token.
         return headers.get(header::AUTHORIZATION).is_some();
     };
-    if matches!(origin,
-        "http://tauri.localhost" | "https://tauri.localhost" | "tauri://localhost"
-        | "http://localhost:5173" | "http://127.0.0.1:5173") {
+    if matches!(
+        origin,
+        "http://tauri.localhost"
+            | "https://tauri.localhost"
+            | "tauri://localhost"
+            | "http://localhost:5173"
+            | "http://127.0.0.1:5173"
+    ) {
         return true;
     }
     let Some(host) = headers
@@ -2538,6 +3176,13 @@ fn origin_is_same_site(headers: &HeaderMap) -> bool {
     let Some(authority) = origin_uri.authority() else {
         return false;
     };
+    // The desktop app serves its UI on an OS-assigned loopback port.
+    if matches!(authority.host(), "127.0.0.1" | "localhost")
+        && origin_uri.scheme_str() == Some("http")
+        && authority.port_u16().is_some()
+    {
+        return true;
+    }
     if !authority.as_str().eq_ignore_ascii_case(host) {
         return false;
     }
@@ -2566,8 +3211,15 @@ fn publish_presence(hub: &RealtimeHub, user_id: i64, role: &str, online: bool) {
     hub.publish(
         EventKind::PresenceChanged,
         Audience::All,
-        Some(ActorRef { user_id, role: role.into() }),
-        Some(EntityRef { kind: "user".into(), id: user_id.to_string(), version: 1 }),
+        Some(ActorRef {
+            user_id,
+            role: role.into(),
+        }),
+        Some(EntityRef {
+            kind: "user".into(),
+            id: user_id.to_string(),
+            version: 1,
+        }),
         serde_json::json!({ "user_id": user_id, "online": online }),
     );
 }
@@ -2742,11 +3394,10 @@ pub(crate) fn hash_session_token(token: &str) -> String {
 }
 
 pub(crate) fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_default()
+    let format = time::format_description::parse_borrowed::<2>("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z")
+        .expect("valid audit timestamp format");
+    OffsetDateTime::now_utc().format(&format).unwrap_or_default()
 }
-
 
 #[derive(Deserialize)]
 struct ProfileBody {
@@ -2775,7 +3426,9 @@ async fn profile(
         .await
         .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
         .unwrap_or(1);
-    Ok(Json(serde_json::json!({ "user": user, "sessions": sessions })))
+    Ok(Json(
+        serde_json::json!({ "user": user, "sessions": sessions }),
+    ))
 }
 
 fn valid_username(value: &str) -> bool {
@@ -2786,9 +3439,7 @@ fn valid_username(value: &str) -> bool {
 }
 
 fn valid_color(value: &str) -> bool {
-    value.len() == 7
-        && value.starts_with('#')
-        && value[1..].chars().all(|c| c.is_ascii_hexdigit())
+    value.len() == 7 && value.starts_with('#') && value[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 async fn update_profile(
@@ -2800,26 +3451,48 @@ async fn update_profile(
     let name = body.name.trim().to_owned();
     let username = body.username.trim().trim_start_matches('@').to_lowercase();
     let bio = body.bio.trim().to_owned();
-    let color = if body.avatar_color.is_empty() { user.avatar_color.clone() } else { body.avatar_color.clone() };
+    let color = if body.avatar_color.is_empty() {
+        user.avatar_color.clone()
+    } else {
+        body.avatar_color.clone()
+    };
     if name.chars().count() < 2 || name.chars().count() > 64 {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Имя должно содержать от 2 до 64 символов"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Имя должно содержать от 2 до 64 символов",
+        ));
     }
     if !valid_username(&username) {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Логин: 3–32 символа, латиница, цифры, точка, дефис или подчёркивание"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Логин: 3–32 символа, латиница, цифры, точка, дефис или подчёркивание",
+        ));
     }
     if bio.chars().count() > 160 {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Описание не длиннее 160 символов"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Описание не длиннее 160 символов",
+        ));
     }
     if !valid_color(&color) {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Некорректный цвет аватара"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Некорректный цвет аватара",
+        ));
     }
     let store = state.store.clone();
     let user_id = user.id;
-    let updated = task::spawn_blocking(move || store.update_profile(user_id, &name, &username, &bio, &color))
-        .await
-        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-        .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сохранить профиль"))?
-        .ok_or(HttpError(StatusCode::CONFLICT, "Этот логин уже занят"))?;
+    let updated =
+        task::spawn_blocking(move || store.update_profile(user_id, &name, &username, &bio, &color))
+            .await
+            .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
+            .map_err(|_| {
+                HttpError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Не удалось сохранить профиль",
+                )
+            })?
+            .ok_or(HttpError(StatusCode::CONFLICT, "Этот логин уже занят"))?;
     state.realtime.publish(
         EventKind::PresenceChanged,
         Audience::All,
@@ -2839,11 +3512,17 @@ fn profile_media_dir(state: &AppState) -> PathBuf {
 }
 
 fn image_extension(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some(("png", "image/png")) }
-    else if bytes.starts_with(b"\xff\xd8\xff") { Some(("jpg", "image/jpeg")) }
-    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some(("gif", "image/gif")) }
-    else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { Some(("webp", "image/webp")) }
-    else { None }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("png", "image/png"))
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(("jpg", "image/jpeg"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("webp", "image/webp"))
+    } else {
+        None
+    }
 }
 
 async fn upload_profile_media(
@@ -2853,12 +3532,26 @@ async fn upload_profile_media(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let actor = authenticated_user(&state, &headers).await?;
-    if actor.id != user_id { return Err(HttpError(StatusCode::FORBIDDEN, "Можно изменять только собственный профиль")); }
-    if !matches!(kind.as_str(), "avatar" | "banner") || body.is_empty() || body.len() > 5 * 1024 * 1024 {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Изображение должно быть не больше 5 МБ"));
+    if actor.id != user_id {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Можно изменять только собственный профиль",
+        ));
+    }
+    if !matches!(kind.as_str(), "avatar" | "banner")
+        || body.is_empty()
+        || body.len() > 5 * 1024 * 1024
+    {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Изображение должно быть не больше 5 МБ",
+        ));
     }
     let Some((extension, _)) = image_extension(&body) else {
-        return Err(HttpError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Поддерживаются PNG, JPEG, GIF и WebP"));
+        return Err(HttpError(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Поддерживаются PNG, JPEG, GIF и WebP",
+        ));
     };
     let dir = profile_media_dir(&state);
     let prefix = format!("{user_id}-{kind}.");
@@ -2867,12 +3560,26 @@ async fn upload_profile_media(
         fs::create_dir_all(&dir)?;
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(&prefix) { let _ = fs::remove_file(entry.path()); }
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = fs::remove_file(entry.path());
+            }
         }
         let destination = dir.join(format!("{user_id}-{kind}.{extension}"));
         fs::write(destination, &body)
-    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сохранения изображения"))?
-      .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сохранения изображения"))?;
+    })
+    .await
+    .map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ошибка сохранения изображения",
+        )
+    })?
+    .map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ошибка сохранения изображения",
+        )
+    })?;
     Ok(Json(json!({ "url": url })))
 }
 
@@ -2882,15 +3589,36 @@ async fn delete_profile_media(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let actor = authenticated_user(&state, &headers).await?;
-    if actor.id != user_id { return Err(HttpError(StatusCode::FORBIDDEN, "Можно изменять только собственный профиль")); }
-    if !matches!(kind.as_str(), "avatar" | "banner") { return Err(HttpError(StatusCode::BAD_REQUEST, "Неизвестный тип изображения")); }
+    if actor.id != user_id {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Можно изменять только собственный профиль",
+        ));
+    }
+    if !matches!(kind.as_str(), "avatar" | "banner") {
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Неизвестный тип изображения",
+        ));
+    }
     let dir = profile_media_dir(&state);
     let prefix = format!("{user_id}-{kind}.");
     task::spawn_blocking(move || {
         if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() { if entry.file_name().to_string_lossy().starts_with(&prefix) { let _ = fs::remove_file(entry.path()); } }
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
         }
-    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка удаления изображения"))?;
+    })
+    .await
+    .map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ошибка удаления изображения",
+        )
+    })?;
     Ok(Json(json!({ "removed": true })))
 }
 
@@ -2898,16 +3626,40 @@ async fn get_profile_media(
     State(state): State<AppState>,
     Path((user_id, kind)): Path<(i64, String)>,
 ) -> Result<Response, HttpError> {
-    if user_id <= 0 || !matches!(kind.as_str(), "avatar" | "banner") { return Err(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено")); }
+    if user_id <= 0 || !matches!(kind.as_str(), "avatar" | "banner") {
+        return Err(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"));
+    }
     let dir = profile_media_dir(&state);
     let prefix = format!("{user_id}-{kind}.");
     let file = task::spawn_blocking(move || -> Option<PathBuf> {
-        fs::read_dir(dir).ok()?.flatten().find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)).map(|entry| entry.path())
-    }).await.map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка чтения изображения"))?
-      .ok_or(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
-    let bytes = tokio::fs::read(file).await.map_err(|_| HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
-    let mime = image_extension(&bytes).map(|(_, mime)| mime).unwrap_or("application/octet-stream");
-    Ok(([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "no-store")], bytes).into_response())
+        fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|entry| entry.path())
+    })
+    .await
+    .map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Ошибка чтения изображения",
+        )
+    })?
+    .ok_or(HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
+    let bytes = tokio::fs::read(file)
+        .await
+        .map_err(|_| HttpError(StatusCode::NOT_FOUND, "Изображение не найдено"))?;
+    let mime = image_extension(&bytes)
+        .map(|(_, mime)| mime)
+        .unwrap_or("application/octet-stream");
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn change_password(
@@ -2917,10 +3669,16 @@ async fn change_password(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     let user = authenticated_user(&state, &headers).await?;
     if body.new_password.chars().count() < 8 {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Новый пароль — минимум 8 символов"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Новый пароль — минимум 8 символов",
+        ));
     }
     if body.new_password == body.current_password {
-        return Err(HttpError(StatusCode::BAD_REQUEST, "Новый пароль совпадает с текущим"));
+        return Err(HttpError(
+            StatusCode::BAD_REQUEST,
+            "Новый пароль совпадает с текущим",
+        ));
     }
     let store = state.store.clone();
     let token = session_from_headers(&headers).unwrap_or_default();
@@ -2934,9 +3692,17 @@ async fn change_password(
     })
     .await
     .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Ошибка сервера"))?
-    .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось сменить пароль"))?;
+    .map_err(|_| {
+        HttpError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Не удалось сменить пароль",
+        )
+    })?;
     if !changed {
-        return Err(HttpError(StatusCode::FORBIDDEN, "Текущий пароль указан неверно"));
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "Текущий пароль указан неверно",
+        ));
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -2960,7 +3726,9 @@ async fn presence(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     authenticated_user(&state, &headers).await?;
-    Ok(Json(serde_json::json!({ "online": state.realtime.online_users() })))
+    Ok(Json(
+        serde_json::json!({ "online": state.realtime.online_users() }),
+    ))
 }
 
 async fn chat_typing(
@@ -2979,22 +3747,80 @@ async fn chat_typing(
         state.realtime.publish(
             EventKind::ChatTyping,
             Audience::User(recipient),
-            Some(ActorRef { user_id, role: user.role.clone() }),
-            Some(EntityRef { kind: "chat_room".into(), id: room_id.to_string(), version: 1 }),
+            Some(ActorRef {
+                user_id,
+                role: user.role.clone(),
+            }),
+            Some(EntityRef {
+                kind: "chat_room".into(),
+                id: room_id.to_string(),
+                version: 1,
+            }),
             serde_json::json!({ "room_id": room_id, "user_id": user_id, "name": user.name }),
         );
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-
 /// Keyword classifier for the required engineer qualification (Планер / Двигатель / Авионика).
 fn classify_qualification(text: &str) -> &'static str {
     let t = text.to_lowercase();
     let score = |words: &[&str]| words.iter().filter(|w| t.contains(*w)).count();
-    let engine = score(&["двигател", "всу", "apu", "запуск", "масл", "турбин", "лопат", "тяг", "реверс", "топлив", "компрессор", "форсаж", "помпаж", "обороты"]);
-    let avionics = score(&["авионик", "радио", "vhf", "навиг", "связ", "датчик", "индикац", "экран", "дисплей", "автопилот", "транспондер", "fms", "ошибк", "блок", "проводк", "электр", "компьютер", "пилотаж"]);
-    let airframe = score(&["планер", "обшивк", "шасси", "гидравл", "стойк", "тормоз", "колес", "колёс", "дверь", "люк", "крыл", "закрылк", "фюзеляж", "трещин", "вмятин", "течь", "утечк"]);
+    let engine = score(&[
+        "двигател",
+        "всу",
+        "apu",
+        "запуск",
+        "масл",
+        "турбин",
+        "лопат",
+        "тяг",
+        "реверс",
+        "топлив",
+        "компрессор",
+        "форсаж",
+        "помпаж",
+        "обороты",
+    ]);
+    let avionics = score(&[
+        "авионик",
+        "радио",
+        "vhf",
+        "навиг",
+        "связ",
+        "датчик",
+        "индикац",
+        "экран",
+        "дисплей",
+        "автопилот",
+        "транспондер",
+        "fms",
+        "ошибк",
+        "блок",
+        "проводк",
+        "электр",
+        "компьютер",
+        "пилотаж",
+    ]);
+    let airframe = score(&[
+        "планер",
+        "обшивк",
+        "шасси",
+        "гидравл",
+        "стойк",
+        "тормоз",
+        "колес",
+        "колёс",
+        "дверь",
+        "люк",
+        "крыл",
+        "закрылк",
+        "фюзеляж",
+        "трещин",
+        "вмятин",
+        "течь",
+        "утечк",
+    ]);
     if engine > avionics && engine >= airframe && engine > 0 {
         "Двигатель"
     } else if avionics > engine && avionics >= airframe && avionics > 0 {

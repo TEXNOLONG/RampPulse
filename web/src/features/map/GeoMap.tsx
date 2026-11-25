@@ -1,27 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Cloud, Copy, Crosshair, LocateFixed, Navigation, Plane, Radio, RefreshCw, Satellite, Square, X } from 'lucide-react';
+import { Cloud, Copy, Crosshair, LocateFixed, Navigation, Plane, RefreshCw, Satellite, Square, Users, X } from 'lucide-react';
 import { get } from '../../lib/api';
+import { usePrefs } from '../../store/prefs';
 import { useGps } from '../../lib/gps';
 import { formatCoordinates, haversineMeters } from '../../lib/geospatial';
-import type { Airport, Aircraft, EngineerLocation } from '../../lib/types';
-import { cx } from '../../lib/format';
+import type { Airport, Aircraft, EngineerLocation, Request, Technician } from '../../lib/types';
+import { cx, qualColor } from '../../lib/format';
 import { WeatherPanel, type WeatherData, type WeatherLocationMode, type WeatherStatus } from './WeatherPanel';
 import boundaries from './data/it2026/airport_boundaries.json';
 import objects from './data/it2026/objects.json';
 import roads from './data/it2026/roads.json';
-import serviceZones from './data/it2026/service_zones.json';
+import serviceZones from './data/final/service_zones.json';
+import finalVehicles from './data/final/service_vehicles_positions.json';
 
-interface LiveAircraft {
-  source_type: 'REAL'; icao24: string; callsign: string | null; registration: string | null;
-  aircraft_type: string | null; description: string | null; latitude: number; longitude: number;
-  altitude_m: number | null; altitude_geom_m: number | null; ground_speed_mps: number | null;
-  heading_deg: number | null; vertical_rate_mps: number | null; squawk: string | null;
-  on_ground: boolean | null; last_seen_ms: number | null; freshness_s: number | null; data_source: string;
-}
-interface Snapshot { provider: string; license: string; status: 'LIVE' | 'STALE' | 'OFFLINE'; enabled: boolean; fetched_at_ms: number | null; age_s: number | null; poll_interval_s: number; aircraft: LiveAircraft[]; error: string | null }
-interface Props { airport: Airport; simulated: Aircraft[]; onClose?(): void; panelOpen?: boolean; importedAirport?: boolean; engineerLocations?: EngineerLocation[]; manageGps?: boolean }
+interface Props { airport: Airport; simulated: Aircraft[]; simulatedTechs?: Technician[]; requests?: Request[]; onClose?(): void; panelOpen?: boolean; importedAirport?: boolean; engineerLocations?: EngineerLocation[]; manageGps?: boolean }
 const IT2026_CENTER: [number, number] = [55.8330053, 37.628713];
 const icon = (glyph: string, color: string, rotate = 0) => L.divIcon({
   className: 'geo-marker-shell',
@@ -102,68 +96,61 @@ function drawAirport(L: typeof import('leaflet'), airport: Airport, group: L.Lay
   }
 }
 
-function bearingDegrees(from: [number, number], to: [number, number]) {
-  const rad = (degrees: number) => degrees * Math.PI / 180;
-  const lat1 = rad(from[0]), lat2 = rad(to[0]), dLon = rad(to[1] - from[1]);
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-}
-
-export function GeoMap({ airport, simulated, onClose, panelOpen = false, importedAirport = false, engineerLocations = [], manageGps = true }: Props) {
+export function GeoMap({ airport, simulated, simulatedTechs = [], requests, onClose, panelOpen = false, importedAirport = false, engineerLocations = [], manageGps = true }: Props) {
+  const theme = usePrefs(s => s.theme);
+  const finalLayer = useRef<L.LayerGroup | null>(null);
+  const originalStyles = useRef(new WeakMap<L.Path, L.PathOptions>());
   const host = useRef<HTMLDivElement>(null);
   const map = useRef<L.Map | null>(null);
-  const realGroup = useRef<L.LayerGroup | null>(null);
   const simGroup = useRef<L.LayerGroup | null>(null);
   const gpsGroup = useRef<L.LayerGroup | null>(null);
   const airportGroup = useRef<L.LayerGroup | null>(null);
   const engineerGroup = useRef<L.LayerGroup | null>(null);
-  const realMarkers = useRef(new Map<string, L.Marker>());
+  const techGroup = useRef<L.LayerGroup | null>(null);
+  const techRouteGroup = useRef<L.LayerGroup | null>(null);
   const simMarkers = useRef(new Map<number, L.Marker>());
-  const history = useRef(new Map<string, [number, number][]>());
+  const simRoutes = useRef(new Map<number, L.Polyline>());
+  const techMarkers = useRef(new Map<number, L.Marker>());
   const gpsHistory = useRef<[number, number][]>([]);
-  const trails = useRef(new Map<string, L.Polyline>());
   const follow = useGps(s => s.follow);
   const rawGps = useGps(s => s.raw);
   const filteredGps = useGps(s => s.filtered);
   const gpsStatus = useGps(s => s.status);
   const gpsError = useGps(s => s.error);
   const jumpDetected = useGps(s => s.jumpDetected);
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherOpen, setWeatherOpen] = useState(false);
   const [weatherClosing, setWeatherClosing] = useState(false);
   const [weatherRefreshing, setWeatherRefreshing] = useState(false);
   const [weatherError, setWeatherError] = useState<string | null>(null);
   const [weatherLocationMode, setWeatherLocationMode] = useState<WeatherLocationMode>('airport');
-  const [weatherLocation, setWeatherLocation] = useState<[number, number]>(() => importedAirport ? IT2026_CENTER : [airport.geo?.latitude ?? 55.97278, airport.geo?.longitude ?? 37.41472]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [showReal, setShowReal] = useState(true);
-  const [showSimulation, setShowSimulation] = useState(false);
+  const [weatherLocation, setWeatherLocation] = useState<[number, number]>(() => importedAirport ? IT2026_CENTER : [airport.geo?.latitude ?? 55.8330053, airport.geo?.longitude ?? 37.628713]);
+  const [showSimulation, setShowSimulation] = useState(importedAirport);
+  const [showTechnicians, setShowTechnicians] = useState(importedAirport);
   const [showGps, setShowGps] = useState(true);
   const [aircraftGpsMode, setAircraftGpsMode] = useState(false);
-  const [aircraftCenter, setAircraftCenter] = useState<[number, number]>(() => importedAirport ? IT2026_CENTER : [airport.geo?.latitude ?? 55.97278, airport.geo?.longitude ?? 37.41472]);
   const weatherButtonRef = useRef<HTMLButtonElement>(null);
   const weatherCloseTimerRef = useRef(0);
   const weatherRequestRef = useRef<{ key: string; requestId: number; promise: Promise<void> } | null>(null);
   const weatherRequestIdRef = useRef(0);
-  const selectedAircraft = useMemo(() => snapshot?.aircraft.find(item => item.icao24 === selected) ?? null, [snapshot, selected]);
-  const airportLat = importedAirport ? IT2026_CENTER[0] : airport.geo?.latitude ?? 55.97278;
-  const airportLon = importedAirport ? IT2026_CENTER[1] : airport.geo?.longitude ?? 37.41472;
+  const airportLat = importedAirport ? IT2026_CENTER[0] : airport.geo?.latitude ?? 55.8330053;
+  const airportLon = importedAirport ? IT2026_CENTER[1] : airport.geo?.longitude ?? 37.628713;
   const weatherLatitude = weatherLocation[0];
   const weatherLongitude = weatherLocation[1];
 
   useEffect(() => {
     if (!host.current || map.current) return;
-    const instance = L.map(host.current, { zoomControl: false, attributionControl: false, preferCanvas: true }).setView([airportLat, airportLon], 11);
+    const instance = L.map(host.current, { zoomControl: false, attributionControl: false, preferCanvas: true, minZoom: 14, maxZoom: 18, zoomSnap: 0.5, scrollWheelZoom: false, maxBoundsViscosity: 1 }).setView([airportLat, airportLon], 14);
     L.control.zoom({ position: 'bottomright' }).addTo(instance);
-    realGroup.current = L.layerGroup().addTo(instance);
     simGroup.current = L.layerGroup().addTo(instance);
     gpsGroup.current = L.layerGroup().addTo(instance);
     airportGroup.current = L.layerGroup().addTo(instance);
     engineerGroup.current = L.layerGroup().addTo(instance);
+    techGroup.current = L.layerGroup().addTo(instance);
+    techRouteGroup.current = L.layerGroup().addTo(instance);
     const bounds = L.latLngBounds([]);
     if (importedAirport) {
+      finalLayer.current = L.layerGroup().addTo(instance);
       const addGeoLayer = (data: GeoJSON.GeoJsonObject, options: L.GeoJSONOptions = {}) => {
         const layer = L.geoJSON(data, options).addTo(airportGroup.current!);
         const layerBounds = layer.getBounds();
@@ -217,13 +204,54 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
       if (fitted || !bounds.isValid() || !host.current || !host.current.clientWidth || !host.current.clientHeight) return;
       instance.invalidateSize({ pan: false, animate: false });
       instance.fitBounds(bounds.pad(importedAirport ? 0.055 : 0.05), { animate: false, maxZoom: importedAirport ? 17 : 16 });
+      instance.setMaxBounds(bounds.pad(importedAirport ? 0.22 : 0.18));
       fitted = true;
     };
     const fitFrame = window.requestAnimationFrame(fitMap);
     const resizeObserver = new ResizeObserver(fitMap);
     resizeObserver.observe(host.current);
-    return () => { window.cancelAnimationFrame(fitFrame); resizeObserver.disconnect(); instance.remove(); map.current = null; realGroup.current = null; simGroup.current = null; gpsGroup.current = null; airportGroup.current = null; engineerGroup.current = null; realMarkers.current.clear(); simMarkers.current.clear(); history.current.clear(); trails.current.clear(); };
+    return () => { window.cancelAnimationFrame(fitFrame); resizeObserver.disconnect(); instance.remove(); map.current = null; simGroup.current = null; gpsGroup.current = null; airportGroup.current = null; engineerGroup.current = null; techGroup.current = null; techRouteGroup.current = null; simMarkers.current.clear(); techMarkers.current.clear(); };
   }, [airport, airportLat, airportLon, importedAirport]);
+
+  useEffect(() => {
+    const layer = finalLayer.current;
+    if (!importedAirport || !layer) return;
+    layer.clearLayers();
+    finalVehicles.features.forEach((feature, index) => {
+      const driverId = [1, 3, 5][index];
+      const driving = requests?.some(request => request.tech_id === driverId && request.travel_mode === 'vehicle'
+        && (request.status === 'assigned' || request.status === 'enroute'));
+      const driver = driving ? simulatedTechs.find(tech => tech.id === driverId) : undefined;
+      const [lon, lat] = feature.geometry.coordinates;
+      const position = (driver && toGeo(airport, driver.x, driver.y)) || [lat, lon] as L.LatLngTuple;
+      const label = document.createElement('span');
+      label.textContent = feature.properties.object_id + ' / ' + feature.properties.model;
+      L.marker(position, { icon: icon('◆', '#fbbf24'), zIndexOffset: 900 }).bindTooltip(label).addTo(layer);
+    });
+  }, [airport, importedAirport, requests, simulatedTechs]);
+
+  useEffect(() => {
+    const colors: Record<string, string> = {
+      '#0b0b0f': '#e5ece8', '#46464f': '#9aaba1', '#18382f': '#d6e9df', '#3f7664': '#729d87',
+      '#0b0b0e': '#c3ced5', '#666670': '#ffffff', '#393941': '#f8fafb', '#426b5c': '#709582',
+      '#565660': '#8d9ea8', '#41414a': '#9aabb7', '#1b1b22': '#d6dfe7', '#111116': '#e0e7ed',
+      '#17171d': '#d4dee5', '#35353e': '#9aabb7', '#28282f': '#aebcc5', '#0c0c10': '#edf1f3',
+      '#292930': '#b9c5cd', '#25252c': '#a4b3bd', '#19191f': '#c7d2da', '#55555e': '#f8fafb',
+      '#45454e': '#899da9', '#92929d': '#607b89', '#18181d': '#e4ecef', '#666671': '#8da2ad', '#18181e': '#eff4f6',
+    };
+    const apply = (layer: L.Layer) => {
+      if (layer instanceof L.LayerGroup) layer.eachLayer(apply);
+      else if (layer instanceof L.Path) {
+        if (!originalStyles.current.has(layer)) originalStyles.current.set(layer, { color: layer.options.color, fillColor: layer.options.fillColor });
+        const original = originalStyles.current.get(layer)!;
+        layer.setStyle(theme === 'light' ? {
+          color: colors[original.color ?? ''] ?? original.color,
+          fillColor: colors[original.fillColor ?? ''] ?? original.fillColor,
+        } : original);
+      }
+    };
+    airportGroup.current?.eachLayer(apply);
+  }, [theme, airport, importedAirport]);
 
   useEffect(() => () => {
     const status = useGps.getState().status;
@@ -240,7 +268,6 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
   }, [airportLat, airportLon, weatherLocationMode]);
 
   useEffect(() => {
-    if (!aircraftGpsMode) setAircraftCenter([airportLat, airportLon]);
   }, [airportLat, airportLon, aircraftGpsMode]);
 
   useEffect(() => {
@@ -249,7 +276,6 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
       setWeatherLocation(previous => haversineMeters(previous, [rawGps.latitude, rawGps.longitude]) >= 250 ? [rawGps.latitude, rawGps.longitude] : previous);
     }
     if (aircraftGpsMode) {
-      setAircraftCenter(previous => haversineMeters(previous, [rawGps.latitude, rawGps.longitude]) >= 5_000 ? [rawGps.latitude, rawGps.longitude] : previous);
     }
   }, [rawGps, weatherLocationMode, aircraftGpsMode]);
 
@@ -312,75 +338,58 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
     return () => { instance.off('moveend', moved); window.clearTimeout(timer); };
   }, [weatherLocationMode, airportLat, airportLon]);
 
-  useEffect(() => {
-    let active = true;
-    let timer = 0;
-    let pollInterval = 180;
-    const load = async () => {
-      try {
-        const response = await get<Snapshot>(`/api/aircraft/live?lat=${aircraftCenter[0]}&lon=${aircraftCenter[1]}`);
-        pollInterval = Math.max(120, response.poll_interval_s || 180);
-        if (active) setSnapshot(response);
-      } catch (error) {
-        pollInterval = Math.max(120, snapshot?.poll_interval_s ?? 180);
-        if (active) setSnapshot({ provider: 'adsb.lol', license: 'ODbL-1.0', status: 'OFFLINE', enabled: false, fetched_at_ms: null, age_s: null, poll_interval_s: 180, aircraft: [], error: error instanceof Error ? error.message : 'Не удалось получить live aircraft.' });
-      } finally {
-        if (active) timer = window.setTimeout(load, pollInterval * 1000);
-      }
-    };
-    void load();
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [aircraftCenter[0], aircraftCenter[1]]);
 
-  useEffect(() => {
-    if (!map.current || !realGroup.current) return;
-    const group = realGroup.current;
-    if (!showReal) { group.clearLayers(); realMarkers.current.clear(); history.current.clear(); trails.current.clear(); return; }
-    const visible = snapshot?.aircraft ?? [];
-    const ids = new Set(visible.map(item => item.icao24));
-    for (const [id, marker] of realMarkers.current) if (!ids.has(id)) { group.removeLayer(marker); realMarkers.current.delete(id); history.current.delete(id); const trail = trails.current.get(id); if (trail) group.removeLayer(trail); trails.current.delete(id); }
-    for (const item of visible) {
-      const position: [number, number] = [item.latitude, item.longitude];
-      const previous = history.current.get(item.icao24) ?? [];
-      if (!previous.length || haversineMeters(previous[previous.length - 1], position) > 15) {
-        previous.push(position); if (previous.length > 60) previous.shift(); history.current.set(item.icao24, previous);
-      }
-      if (previous.length > 1) {
-        const color = snapshot?.status === 'LIVE' ? '#F4F4F5' : '#fbbf24';
-        let trail = trails.current.get(item.icao24);
-        if (!trail) { trail = L.polyline(previous, { color, weight: 2, opacity: 0.58, dashArray: '3 7' }); trails.current.set(item.icao24, trail); group.addLayer(trail); }
-        else trail.setLatLngs(previous).setStyle({ color });
-      }
-      let marker = realMarkers.current.get(item.icao24);
-      if (!marker) {
-        marker = L.marker(position, { icon: aircraftIcon('#F4F4F5', item.heading_deg ?? 0), keyboard: true })
-          .on('click', () => { setWeatherOpen(false); setWeatherClosing(false); setSelected(item.icao24); map.current?.flyTo(position, Math.max(map.current.getZoom(), 12), { duration: 0.7 }); });
-        realMarkers.current.set(item.icao24, marker); group.addLayer(marker);
-      } else {
-        marker.setLatLng(position);
-        marker.setIcon(aircraftIcon(snapshot?.status === 'LIVE' ? '#F4F4F5' : '#fbbf24', item.heading_deg ?? 0));
-      }
-      marker.bindTooltip(`${item.callsign || item.icao24} · ${item.aircraft_type || 'type n/a'}`);
-    }
-  }, [snapshot, showReal]);
 
   useEffect(() => {
     if (!simGroup.current) return;
     const group = simGroup.current;
-    if (!showSimulation) { group.clearLayers(); simMarkers.current.clear(); return; }
+    if (!showSimulation) { group.clearLayers(); simMarkers.current.clear(); simRoutes.current.clear(); return; }
     const ids = new Set(simulated.map(item => item.id));
     for (const [id, marker] of simMarkers.current) if (!ids.has(id)) { group.removeLayer(marker); simMarkers.current.delete(id); }
+    for (const [id, route] of simRoutes.current) if (!ids.has(id)) { group.removeLayer(route); simRoutes.current.delete(id); }
     for (const aircraft of simulated) {
       const point = toGeo(airport, aircraft.x, aircraft.y);
       if (!point) continue;
+      const routePoints = aircraft.route.map(([x, y]) => toGeo(airport, x, y)).filter((position): position is [number, number] => position !== null);
+      if (routePoints.length > 1) {
+        const route = simRoutes.current.get(aircraft.id);
+        if (route) route.setLatLngs(routePoints);
+        else simRoutes.current.set(aircraft.id, L.polyline(routePoints, { color: '#F4F4F5', weight: 2.5, opacity: 0.8, dashArray: '5 7', interactive: false }).addTo(group));
+      } else {
+        const route = simRoutes.current.get(aircraft.id);
+        if (route) { group.removeLayer(route); simRoutes.current.delete(aircraft.id); }
+      }
       let marker = simMarkers.current.get(aircraft.id);
       if (!marker) {
         marker = L.marker(point, { icon: aircraftIcon('#F4F4F5', aircraft.heading), opacity: 0.8 });
-        marker.bindTooltip(`${aircraft.flight} · SIMULATION`);
+        marker.bindTooltip(`${aircraft.flight} · ${aircraft.status_ru} · SIMULATION`);
         simMarkers.current.set(aircraft.id, marker); group.addLayer(marker);
-      } else { marker.setLatLng(point); marker.setIcon(aircraftIcon('#F4F4F5', aircraft.heading)); }
+      } else { marker.setLatLng(point); marker.setIcon(aircraftIcon('#F4F4F5', aircraft.heading)); marker.setTooltipContent(`${aircraft.flight} · ${aircraft.status_ru} · SIMULATION`); }
     }
   }, [airport, simulated, showSimulation]);
+
+  useEffect(() => {
+    const group = techGroup.current;
+    const routes = techRouteGroup.current;
+    if (!group || !routes) return;
+    routes.clearLayers();
+    if (!showTechnicians) { group.clearLayers(); techMarkers.current.clear(); return; }
+    const ids = new Set(simulatedTechs.map(tech => tech.id));
+    for (const [id, marker] of techMarkers.current) if (!ids.has(id)) { group.removeLayer(marker); techMarkers.current.delete(id); }
+    for (const tech of simulatedTechs) {
+      const point = toGeo(airport, tech.x, tech.y);
+      if (!point) continue;
+      const route = tech.route.map(([x, y]) => toGeo(airport, x, y)).filter((position): position is [number, number] => position !== null);
+      if (route.length > 1) L.polyline(route, { color: qualColor(tech.qual), weight: 2.5, opacity: 0.72, dashArray: '5 5', interactive: false }).addTo(routes);
+      let marker = techMarkers.current.get(tech.id);
+      if (!marker) {
+        marker = L.marker(point, { icon: icon('●', qualColor(tech.qual)), zIndexOffset: 850 });
+        marker.addTo(group);
+        techMarkers.current.set(tech.id, marker);
+      } else marker.setLatLng(point);
+      marker.bindTooltip(`${tech.name} · ${tech.qual} · ${tech.status === 'busy' ? 'на заявке' : tech.on_shift ? 'на смене' : 'не на смене'}`);
+    }
+  }, [airport, simulatedTechs, showTechnicians]);
 
   useEffect(() => {
     if (!map.current || !gpsGroup.current) return;
@@ -456,9 +465,6 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
     if (nextMode === 'my' && rawGps) setWeatherLocation([rawGps.latitude, rawGps.longitude]);
     setWeatherLocationMode(nextMode);
   };
-  const distance = rawGps && selectedAircraft ? haversineMeters([rawGps.latitude, rawGps.longitude], [selectedAircraft.latitude, selectedAircraft.longitude]) : null;
-  const statusText = snapshot?.status ?? 'CONNECTING';
-  const mode = showReal && showSimulation ? 'HYBRID' : showReal ? 'REAL DATA' : showSimulation ? 'SIMULATION' : 'LAYERS OFF';
   const weatherAgeMs = weather?.fetched_at_ms == null ? null : Date.now() - weather.fetched_at_ms;
   const weatherStatus: WeatherStatus = weatherRefreshing
     ? (weather?.fetched_at_ms ? 'UPDATING' : 'CONNECTING')
@@ -475,25 +481,16 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
     ? airport.name
     : weatherLocationMode === 'map' ? 'Центр карты' : 'Моё местоположение';
   const weatherIcao = weatherLocationMode === 'airport' ? airport.geo?.icao ?? airport.geo?.iata ?? null : null;
-  const trackBearing = rawGps && selectedAircraft ? bearingDegrees([rawGps.latitude, rawGps.longitude], [selectedAircraft.latitude, selectedAircraft.longitude]) : null;
-  const aircraftEtaMinutes = distance != null && selectedAircraft?.ground_speed_mps && selectedAircraft.ground_speed_mps > 0
-    ? distance / selectedAircraft.ground_speed_mps / 60
-    : null;
-
   return <div className={cx('geo-map-stage', weatherOpen && 'weather-open')}>
     <div ref={host} className={cx('geo-map', importedAirport && 'geo-map-imported')} aria-label="Интерактивная географическая карта аэропорта и реальных воздушных судов" />
     <div className="geo-toolbar glass">
       <div className="geo-layer-list">
-        <button className={cx(showReal && 'on')} onClick={() => setShowReal(value => !value)}><Radio size={14} /> REAL {snapshot?.aircraft.length ?? 0}</button>
         <button className={cx(showSimulation && 'on')} onClick={() => setShowSimulation(value => !value)}><Satellite size={14} /> SIMULATION</button>
+        <button className={cx(showTechnicians && 'on')} onClick={() => setShowTechnicians(value => !value)}><Users size={14} /> TECH {simulatedTechs.filter(tech => tech.on_shift).length}</button>
         <button className={cx(showGps && 'on')} onClick={() => setShowGps(value => !value)}><LocateFixed size={14} /> GPS {gpsStatus}</button>
       </div>
-      <span className={cx('geo-feed-status', statusText.toLowerCase())}><i /> {statusText}</span>
-      <b className="geo-mode-label">{mode}</b>
-      <small>{snapshot?.provider ?? 'adsb.lol'} · {snapshot?.age_s == null ? 'waiting' : `${snapshot.age_s}s`} · {snapshot?.poll_interval_s ?? 180}s</small>
-      {snapshot?.error && <small className="geo-feed-error" title={snapshot.error}>{snapshot.error}</small>}
     </div>
-    <button ref={weatherButtonRef} className={cx('geo-weather-toggle glass', weatherOpen && 'on', weatherStatus.toLowerCase())} onClick={() => { setSelected(null); setWeatherClosing(false); setWeatherOpen(true); void loadWeather(); }} aria-expanded={weatherOpen} aria-controls="geo-weather-panel" aria-label={`Weather · ${weatherStatus}${weather?.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}`}>
+    <button ref={weatherButtonRef} className={cx('geo-weather-toggle glass', weatherOpen && 'on', weatherStatus.toLowerCase())} onClick={() => { if (weatherOpen && !weatherClosing) { closeWeather(); return; } window.clearTimeout(weatherCloseTimerRef.current); setWeatherClosing(false); setWeatherOpen(true); void loadWeather(); }} aria-expanded={weatherOpen} aria-controls="geo-weather-panel" aria-label={`${weatherOpen ? 'Закрыть' : 'Открыть'} погоду${weather?.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}`}>
       <Cloud size={17} /><span>WEATHER</span><b>{weather?.temperature_c == null ? '—°' : `${weather.temperature_c}°`}</b><i title={weatherStatus} />
     </button>
     {weatherOpen && <WeatherPanel id="geo-weather-panel" closing={weatherClosing} weather={weather} status={weatherStatus} error={weatherError} locationName={weatherLocationName} icao={weatherIcao} latitude={weatherLatitude} longitude={weatherLongitude} locationMode={weatherLocationMode} gpsAvailable={!!filteredGps} refreshing={weatherRefreshing} onLocationMode={selectWeatherLocation} onRefresh={() => { void loadWeather(true); }} onClose={closeWeather} />}
@@ -513,35 +510,14 @@ export function GeoMap({ airport, simulated, onClose, panelOpen = false, importe
     </div>}
     <div className="geo-tools glass">
       {gpsStatus === 'ACTIVE' || gpsStatus === 'LOW_ACCURACY' || gpsStatus === 'STALE' ? <button title="Остановить GPS" aria-label="Остановить GPS" onClick={stopGps}><Square size={15} /></button> : <button title="Запросить доступ к геоданным" aria-label="Запросить доступ к геоданным" onClick={startGps}><LocateFixed size={16} /></button>}
-      <button className={cx(aircraftGpsMode && 'on')} title="Применить моё местоположение: карта, погода и реальные борта" aria-label="Применить моё местоположение: карта, погода и реальные борта" onClick={applyMyLocation}><Plane size={16} /></button>
+      <button className={cx(aircraftGpsMode && 'on')} title="Применить моё местоположение: карта и погода" aria-label="Применить моё местоположение: карта и погода" onClick={applyMyLocation}><Plane size={16} /></button>
       <button title={follow ? 'Выключить слежение' : 'Следовать за GPS'} className={cx(follow && 'on')} disabled={!rawGps} onClick={() => useGps.getState().setFollow(!follow)}><Crosshair size={16} /></button>
       <button title="Центрировать на GPS" disabled={!rawGps} onClick={centerGps}><Navigation size={16} /></button>
       <button title="Центрировать на аэропорт" onClick={centerAirport}><RefreshCw size={15} /></button>
     </div>
     {gpsError && <div className="geo-gps-error glass">{gpsError}<button onClick={startGps}>Повторить</button></div>}
     {!importedAirport && !airport.geo_transform && showSimulation && simulated.length > 0 && <div className="geo-map-note glass">На геокарте отображаются реальные борта и GPS. Для бортов SIMULATION остаётся локальная схема перрона: у текущей схемы нет сохранённой геопривязки.</div>}
-    {selectedAircraft && <aside className="geo-aircraft-card glass">
-      <button className="geo-card-close" aria-label="Закрыть карточку" onClick={() => setSelected(null)}><X size={16} /></button>
-      <span className="eyebrow">REAL AIRCRAFT · {selectedAircraft.data_source}</span>
-      <h3>{selectedAircraft.callsign || 'Unknown callsign'}</h3>
-      <div className="geo-aircraft-grid">
-        <span>ICAO24<b>{selectedAircraft.icao24.toUpperCase()}</b></span>
-        <span>REGISTRATION<b>{selectedAircraft.registration || '—'}</b></span>
-        <span>TYPE<b>{selectedAircraft.aircraft_type || selectedAircraft.description || '—'}</b></span>
-        <span>POSITION<b>{selectedAircraft.latitude}, {selectedAircraft.longitude}</b></span>
-        <span>ALTITUDE<b>{selectedAircraft.altitude_m == null ? selectedAircraft.on_ground ? 'GROUND' : '—' : `${Math.round(selectedAircraft.altitude_m)} m`}</b></span>
-        <span>SPEED<b>{selectedAircraft.ground_speed_mps == null ? '—' : `${selectedAircraft.ground_speed_mps.toFixed(1)} m/s`}</b></span>
-        <span>HEADING<b>{bearingText(selectedAircraft.heading_deg)}</b></span>
-        <span>DISTANCE FROM GPS<b>{distance == null ? 'GPS off' : `${(distance / 1000).toFixed(1)} km`}</b></span>
-        <span>BEARING FROM GPS<b>{trackBearing == null ? 'GPS off' : bearingText(trackBearing)}</b></span>
-        <span>ETA AT CURRENT SPEED<b>{aircraftEtaMinutes == null ? '—' : `~${Math.round(aircraftEtaMinutes)} min`}</b></span>
-        <span>VERTICAL RATE<b>{selectedAircraft.vertical_rate_mps == null ? '—' : `${selectedAircraft.vertical_rate_mps.toFixed(1)} m/s`}</b></span>
-        <span>SQUAWK<b>{selectedAircraft.squawk || '—'}</b></span>
-        <span>LAST POSITION<b>{selectedAircraft.freshness_s == null ? '—' : `${selectedAircraft.freshness_s.toFixed(1)} s ago`}</b></span>
-      </div>
-      <div className="geo-copy-row">{(['DD', 'DMS', 'GEO URI'] as const).map(format => <button className="geo-copy" key={format} onClick={() => copyCoordinates(selectedAircraft.latitude, selectedAircraft.longitude, format)}><Copy size={13} /> {format}</button>)}</div>
-    </aside>}
-    <div className="geo-attribution glass"><b className="geo-provider-logo">{importedAirport ? 'ВДНХ' : 'SVO'}</b><span>{importedAirport ? 'ВДНХ · IT2026 Aero GeoData' : 'Шереметьево · локальная схема'} · авиационные данные adsb.lol</span></div>
+    <div className="geo-attribution glass"><b className="geo-provider-logo">ВДНХ</b><span>ВДНХ · IT2026 Aero GeoData</span></div>
     {onClose && <button className="geo-close glass" onClick={onClose} aria-label="Закрыть геокарту"><X size={16} /></button>}
   </div>;
 }

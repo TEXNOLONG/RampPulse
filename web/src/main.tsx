@@ -9,6 +9,7 @@ import './styles/app.css';
 import './styles/chat.css';
 import './styles/auth.css';
 import './styles/engineer.css';
+import './styles/workspace.css';
 
 import { desktop } from './lib/desktop';
 desktop.markReady();

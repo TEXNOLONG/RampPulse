@@ -20,7 +20,8 @@ function distanceMeters(a: GpsFix, b: GpsFix) {
   const dLon = radians(b.longitude - a.longitude);
   const lat1 = radians(a.latitude), lat2 = radians(b.latitude);
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-  return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  const boundedH = Math.max(0, Math.min(1, h));
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(boundedH), Math.sqrt(1 - boundedH));
 }
 
 export const useGps = create<GpsStore>((set, get) => ({
@@ -34,47 +35,66 @@ export const useGps = create<GpsStore>((set, get) => ({
       return;
     }
     set({ status: 'REQUESTING_PERMISSION', raw: null, filtered: null, error: null, jumpDetected: false, follow: false });
-    watchId = navigator.geolocation.watchPosition(position => {
-      const c = position.coords;
-      const raw: GpsFix = {
-        latitude: c.latitude, longitude: c.longitude, accuracy: c.accuracy,
-        altitude: c.altitude, altitudeAccuracy: c.altitudeAccuracy,
-        heading: c.heading, speed: c.speed, timestamp: position.timestamp,
-      };
-      const previous = previousRaw;
-      const elapsed = previous ? Math.max(0.25, (raw.timestamp - previous.timestamp) / 1000) : 0;
-      const jumpDetected = Boolean(previous && distanceMeters(previous, raw) / elapsed > 100);
-      const priorFiltered = get().filtered;
-      let filtered = priorFiltered;
-      if (!jumpDetected || !priorFiltered) {
-        if (!priorFiltered) filtered = { latitude: raw.latitude, longitude: raw.longitude };
-        else {
-          const previousAccuracy = Math.max(1, get().raw?.accuracy ?? raw.accuracy);
-          const currentAccuracy = Math.max(1, raw.accuracy);
-          const alpha = Math.max(0.2, Math.min(0.8, previousAccuracy / (previousAccuracy + currentAccuracy)));
-          filtered = {
-            latitude: priorFiltered.latitude + (raw.latitude - priorFiltered.latitude) * alpha,
-            longitude: priorFiltered.longitude + (raw.longitude - priorFiltered.longitude) * alpha,
-          };
-        }
+    const onError = (error: GeolocationPositionError | null, override?: string) => {
+      if (watchId != null) {
+        try { navigator.geolocation.clearWatch(watchId); } catch { /* WebView may have already released its GPS provider. */ }
       }
-      previousRaw = raw;
-      set({ raw, filtered, jumpDetected, error: null, status: raw.accuracy > 25 ? 'LOW_ACCURACY' : 'ACTIVE' });
-      window.clearTimeout(staleTimer);
-      staleTimer = window.setTimeout(() => set(s => s.raw?.timestamp === raw.timestamp ? { status: 'STALE' } : s), 30_000);
-    }, error => {
       watchId = null;
       window.clearTimeout(staleTimer);
-      const message = error.code === error.PERMISSION_DENIED
+      const permissionDenied = error !== null && error.code === error.PERMISSION_DENIED;
+      const positionUnavailable = error !== null && error.code === error.POSITION_UNAVAILABLE;
+      const message = override ?? (permissionDenied
         ? 'Разрешите RampPulse доступ к геолокации в настройках устройства.'
-        : error.code === error.POSITION_UNAVAILABLE
+        : positionUnavailable
           ? 'Устройство не отдаёт GPS. Включите системную геолокацию и выйдите на открытое место.'
-          : 'GPS-фикс не получен вовремя. Проверьте системную геолокацию и попробуйте ещё раз.';
+          : 'GPS-фикс не получен вовремя. Проверьте системную геолокацию и попробуйте ещё раз.');
       set({ status: 'ERROR', error: message });
-    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 45_000 });
+    };
+    try {
+      watchId = navigator.geolocation.watchPosition(position => {
+        const c = position.coords;
+        if (!Number.isFinite(c.latitude) || !Number.isFinite(c.longitude) || !Number.isFinite(c.accuracy)
+          || c.latitude < -90 || c.latitude > 90 || c.longitude < -180 || c.longitude > 180) {
+          onError(null, 'Устройство вернуло некорректные GPS-координаты. Попробуйте ещё раз.');
+          return;
+        }
+        const raw: GpsFix = {
+          latitude: c.latitude, longitude: c.longitude, accuracy: c.accuracy,
+          altitude: c.altitude, altitudeAccuracy: c.altitudeAccuracy,
+          heading: c.heading, speed: c.speed, timestamp: position.timestamp,
+        };
+        const previous = previousRaw;
+        const elapsed = previous ? Math.max(0.25, (raw.timestamp - previous.timestamp) / 1000) : 0;
+        const jumpDetected = Boolean(previous && distanceMeters(previous, raw) / elapsed > 100);
+        const priorFiltered = get().filtered;
+        let filtered = priorFiltered;
+        if (!jumpDetected || !priorFiltered) {
+          if (!priorFiltered) filtered = { latitude: raw.latitude, longitude: raw.longitude };
+          else {
+            const previousAccuracy = Math.max(1, get().raw?.accuracy ?? raw.accuracy);
+            const currentAccuracy = Math.max(1, raw.accuracy);
+            const alpha = Math.max(0.2, Math.min(0.8, previousAccuracy / (previousAccuracy + currentAccuracy)));
+            filtered = {
+              latitude: priorFiltered.latitude + (raw.latitude - priorFiltered.latitude) * alpha,
+              longitude: priorFiltered.longitude + (raw.longitude - priorFiltered.longitude) * alpha,
+            };
+          }
+        }
+        previousRaw = raw;
+        set({ raw, filtered, jumpDetected, error: null, status: raw.accuracy > 25 ? 'LOW_ACCURACY' : 'ACTIVE' });
+        window.clearTimeout(staleTimer);
+        staleTimer = window.setTimeout(() => set(s => s.raw?.timestamp === raw.timestamp ? { status: 'STALE' } : s), 30_000);
+      }, onError, { enableHighAccuracy: true, maximumAge: 0, timeout: 45_000 });
+    } catch {
+      watchId = null;
+      window.clearTimeout(staleTimer);
+      set({ status: 'ERROR', error: 'Android не смог запустить геолокацию. Проверьте разрешение и системный GPS.' });
+    }
   },
   stop() {
-    if (watchId != null) navigator.geolocation?.clearWatch(watchId);
+    if (watchId != null) {
+      try { navigator.geolocation?.clearWatch(watchId); } catch { /* WebView may have already released its GPS provider. */ }
+    }
     watchId = null; previousRaw = null; window.clearTimeout(staleTimer);
     set({ status: 'STOPPED', raw: null, filtered: null, error: null, jumpDetected: false, follow: false });
   },

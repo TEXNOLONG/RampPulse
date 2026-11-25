@@ -138,6 +138,13 @@
 .call-btn.end>span{background:var(--red);box-shadow:0 12px 30px -8px rgba(239,68,68,.8)}
 .call-btn.mute>span{background:rgba(255,255,255,.12)}
 .call-btn.on>span{background:#fff;color:#09090B}
+:root[data-theme="light"] .msg-row.own .bubble{background:linear-gradient(165deg,#3c4a59,#26323e);border-color:rgba(23,33,43,.12);color:#fff}
+:root[data-theme="light"] .msg-row.own .meta{color:rgba(255,255,255,.72)}
+:root[data-theme="light"] .day-sep span{background:rgba(255,255,255,.94)}
+:root[data-theme="light"] .bubble.bare .meta{background:rgba(23,33,43,.78);color:#fff}
+:root[data-theme="light"] .composer,:root[data-theme="light"] .sticker-grid{background:var(--glass-strong)}
+:root[data-theme="light"] .composer-input{background:var(--raise-2)}
+:root[data-theme="light"] .voice-wave i{background:rgba(23,33,43,.22)}
 .call-mini{position:fixed;z-index:790;top:calc(14px + var(--safe-top));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:6px 6px 6px 8px;border-radius:999px;cursor:pointer;animation:pop .25s var(--spring);border-color:rgba(52,211,153,.35)}
 .call-mini>div{display:flex;flex-direction:column;line-height:1.2;padding-right:4px}
 .call-mini b{font-size:13px}

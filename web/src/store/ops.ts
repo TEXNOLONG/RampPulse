@@ -80,6 +80,14 @@ export const useOps = create<OpsStore>((set, getState) => ({
 
   handle(packet) {
     const kind = packet.kind;
+    if (kind === 'request_assigned') {
+      clearTimeout(reloadTimer);
+      void getState().reload();
+      return;
+    }
+    if (kind === 'request_escalated' && (packet.payload as any)?.kind === 'arrival_warning') {
+      void import('../components/ui').then(({ toast }) => toast.bad((packet.payload as any).message, 'Срок прибытия'));
+    }
     if (kind === 'heartbeat_ack' || kind.startsWith('chat_') || kind.startsWith('call_') || kind === 'presence_changed') return;
     if (kind === 'state_delta' && packet.entity?.kind === 'technician_location') {
       const payload = packet.payload as any;
@@ -91,7 +99,7 @@ export const useOps = create<OpsStore>((set, getState) => ({
     const current = getState().state;
     if (kind === 'state_delta' && packet.entity?.kind === 'simulation' && current) {
       applySimulationDelta(current, packet.payload);
-      set(s => ({ state: { ...current }, tick: s.tick + 1 }));
+      set(s => ({ state: { ...current, techs: [...current.techs], aircraft: [...current.aircraft], active: [...current.active] }, tick: s.tick + 1 }));
       return;
     }
     // Domain change: coalesce bursts of events into one snapshot fetch.
@@ -131,9 +139,13 @@ function applySimulationDelta(state: ShiftState, payload: any) {
 }
 
 export const act = {
-  sim: (body: { speed?: number; running?: boolean }) => post('/api/sim', body),
-  createRequest: (body: { stand: string; description: string; qual: string; extra: string; priority: string; tech_id?: number | null }) => post('/api/requests', body),
-  dispatcherStep: (id: number, step: 'arrive' | 'start' | 'resolve' | 'cancel') => post(`/api/requests/${id}/${step}`),
+  sim: (body: { speed?: number; running?: boolean; spawn_at_terminal?: boolean }) => post('/api/sim', body),
+  createRequest: (body: { stand: string; description: string; qual: string; extra: string; priority: string; via?: string[]; tech_id?: number | null }) => post('/api/requests', body),
+  assignRequest: (id: number, tech_id: number, confirm_reassignment = false) => post(`/api/requests/${id}/assign`, { tech_id, confirm_reassignment }),
+  acceptRequest: (id: number) => post(`/api/requests/${id}/status`, { status: 'enroute' }),
+  dispatcherStep: (id: number, step: 'arrive' | 'start' | 'resolve' | 'cancel', confirm_shift_lead = false) => step === 'cancel'
+    ? post(`/api/requests/${id}/status`, { status: 'cancelled', confirm_shift_lead })
+    : post(`/api/requests/${id}/${step}`),
   engineerStep: (id: number, step: 'arrive' | 'start' | 'resolve') => post(`/api/engineer/requests/${id}/${step}`),
   blockEdge: (id: string, blocked: boolean) => post(`/api/edges/${id}/block`, { blocked }),
   spawnAircraft: () => post('/api/aircraft/spawn'),

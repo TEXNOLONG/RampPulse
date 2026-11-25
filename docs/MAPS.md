@@ -1,5 +1,7 @@
-# Offline airport map
+# Карта ВДНХ
 
-The Sheremetyevo geographic view is drawn locally from `data/airport_sheremetyevo.json`. The separate IT2026 view uses the supplied VDNH-area GeoJSON files in `web/src/features/map/data/it2026/` and shares the dark visual style of the operations map. Leaflet is only the local pan/zoom renderer; neither view requests raster tiles, requires a map API key, or depends on a map service.
+ВДНХ — основная карта RampPulse. Локальная схема `data/airport_vdnh.json` строится из дорожной разметки и GeoJSON IT2026 и используется сервером для координат стоянок, баз инженеров, маршрутов и движения симулируемых самолётов. Географический слой отображает ту же схему в координатах ВДНХ без сторонних картографических тайлов.
 
-The bundled geodata covers the selected airport or IT2026 area, not the whole country. Live aircraft, weather, and engineer locations still use their configured data services; both map backgrounds are offline.
+В симуляции борта появляются на прилётных точках, следуют по связям рулёжной сети и занимают свободные стоянки. Инженеры смены и их маршруты берутся из состояния сервера и отображаются на той же карте. GPS инженера остаётся отдельным реальным местоположением устройства.
+
+Живой слой REAL показывает только данные ADS-B от подключённого сервиса. Симуляция самолётов не выдаётся за реальный воздушный трафик; ВДНХ здесь является тестовой картой приложения.

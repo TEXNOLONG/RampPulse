@@ -15,6 +15,8 @@
 .auth-hero p{max-width:480px;font-size:16px;line-height:1.6;color:var(--text-2)}
 .auth-points{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:560px}
 .auth-points li{display:flex;gap:11px;align-items:flex-start;padding:14px;border-radius:16px;background:rgba(9,9,11,.55);backdrop-filter:blur(14px);border:1px solid var(--line-2)}
+:root[data-theme="light"] .auth-bg::after{background:radial-gradient(60% 70% at 15% 45%,rgba(23,33,43,.04),transparent 70%),linear-gradient(90deg,rgba(244,246,248,.3),rgba(244,246,248,.8))}
+:root[data-theme="light"] .auth-points li{background:rgba(255,255,255,.78)}
 .auth-points svg{color:var(--accent-3);margin-top:2px}
 .auth-points div{display:flex;flex-direction:column;gap:2px}
 .auth-points b{font-size:13.5px;font-weight:620}

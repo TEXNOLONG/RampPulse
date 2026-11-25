@@ -1,5 +1,6 @@
+import { routeInstruction } from '../../lib/navigation';
 import { apiUrl } from '../../lib/api';
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { ClipboardList, Map as MapIcon, MessageCircle, UserRound, Phone, MessageSquare, LifeBuoy, Clock, Check, Play, Flag, MapPin, Plane, Navigation, Power, Wifi, WifiOff, Coffee, Footprints, Car, ListChecks, FileText, ChevronRight, Timer } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { useChat, useUnreadTotal } from '../../store/chat';
@@ -36,16 +37,39 @@ export function EngineerApp() {
   const gpsStatus = useGps(s => s.status);
   const gpsFix = useGps(s => s.raw);
   const task = state.active[0] ?? null;
+  const navigationHint = useMemo(() => {
+    const tech = state.techs.find(t => t.id === task?.tech_id);
+    if (!tech || !task || !['assigned', 'enroute'].includes(task.status)) return null;
+    if (tech.route_available === false) return {text:'Маршрут недоступен — свяжитесь с диспетчером',remaining:0,turn:'unavailable'};
+    if (!tech.route.length) return {text:'Рассчитываем маршрут…',remaining:0,turn:'loading'};
+    return routeInstruction([tech.x, tech.y], tech.route);
+  }, [state.techs, task?.tech_id, task?.status]);
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
+    const refresh = async () => {
+      if (document.visibilityState === 'visible') await useOps.getState().reload();
+      if (!stopped) timer = window.setTimeout(refresh, 2000);
+    };
+    void refresh();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, []);
+  const lastNotifiedTask = useRef<number | null>(null);
+  const [newTaskId, setNewTaskId] = useState<number | null>(null);
+  useEffect(() => {
+    if (!task || lastNotifiedTask.current === task.id) return;
+    lastNotifiedTask.current = task.id;
+    if (task.status === 'assigned' || task.status === 'enroute') {
+      setNewTaskId(task.id);
+      navigator.vibrate?.([200, 100, 200]);
+    }
+  }, [task?.id, task?.status]);
 
   useEffect(() => { useChat.getState().setOpen(tab === 'chat'); }, [tab]);
   const onShift = state.account?.on_shift ?? me.on_shift;
   useEffect(() => {
-    if (!sharingLocation || tab !== 'map' || !onShift) {
-      if (sharingLocation) {
-        setSharingLocation(false);
-        void post('/api/engineer/location', { enabled: false }).catch(() => undefined);
-        useGps.getState().stop();
-      }
+    if (!sharingLocation || !onShift) {
+      if (!onShift && sharingLocation) setSharingLocation(false);
       return;
     }
     useGps.getState().start();
@@ -53,9 +77,9 @@ export function EngineerApp() {
     let lastSent = 0;
     const send = () => {
       const fix = useGps.getState().raw;
-      if (!fix || Date.now() - lastSent < 4_500) return;
-      lastSent = Date.now();
-      void post('/api/engineer/location', { enabled: true, latitude: fix.latitude, longitude: fix.longitude, accuracy: fix.accuracy, heading: fix.heading, speed: fix.speed })
+      if (!fix || Date.now() - fix.timestamp > 30_000 || fix.timestamp <= lastSent) return;
+      lastSent = fix.timestamp;
+      void post('/api/engineer/location', { enabled: true, observed_ms: fix.timestamp, latitude: fix.latitude, longitude: fix.longitude, accuracy: fix.accuracy, heading: fix.heading, speed: fix.speed })
         .then(() => setLocationShareError(null)).catch(error => setLocationShareError(errorText(error)));
     };
     send();
@@ -65,10 +89,15 @@ export function EngineerApp() {
       void post('/api/engineer/location', { enabled: false }).catch(() => undefined);
       useGps.getState().stop();
     };
-  }, [sharingLocation, tab, onShift]);
+  }, [sharingLocation, onShift]);
 
   return (
     <div className="eng">
+      <Modal open={newTaskId != null && newTaskId === task?.id && ['assigned', 'enroute'].includes(task?.status ?? '')} onClose={() => setNewTaskId(null)} title="У вас новая заявка">
+        <p>{task?.stand} · {task?.description}</p>
+        <p className="muted">Диспетчер назначил вас исполнителем. Маршрут рассчитывается по дорогам ВДНХ.</p>
+        <Button onClick={() => { setNewTaskId(null); setTab('task'); }}>Посмотреть заявку</Button>
+      </Modal>
       <header className="eng-bar">
         <Logo size={32} />
         <div className="eng-bar-title"><b>{me.name}</b><span>{me.qual} · {state.airport_name}</span></div>
@@ -76,12 +105,12 @@ export function EngineerApp() {
       </header>
 
       <main className="eng-main">
-        {tab === 'task' && <TaskTab task={task} onMap={() => setTab('map')} onChat={() => setTab('chat')} />}
+        {tab === 'task' && <>{navigationHint && <button className="engineer-navigation" onClick={() => setTab('map')}><Navigation size={24}/><span><b>{navigationHint.text}</b><small>{task?.travel_mode === 'vehicle' ? 'Спецтранспорт' : 'Пешком'} · осталось {Math.round(navigationHint.remaining)} м · {mmss(task?.eta_left)}</small></span><ChevronRight size={18}/></button>}<TaskTab task={task} onMap={() => setTab('map')} onChat={() => setTab('chat')} /></>}
         {tab === 'map' && (
           <div className="eng-map">
-            <Suspense fallback={<div className="geo-map-loading glass">Loading map…</div>}><GeoMap airport={airport} simulated={[]} importedAirport panelOpen={false} manageGps={false} /></Suspense>
-            <div className="map-task glass location-share"><MapPin size={16} /><div><b>{sharingLocation ? (locationShareError ? 'Не удалось передать координаты' : gpsFix ? 'Передача геопозиции включена' : `GPS: ${gpsStatus}`) : 'Передача геопозиции выключена'}</b><span>{locationShareError || (onShift ? 'Диспетчер видит ваше местоположение на карте' : 'Начните смену, чтобы делиться местоположением')}</span></div><button disabled={!onShift && !sharingLocation} onClick={() => setSharingLocation(value => !value)}>{sharingLocation ? 'Остановить' : 'Поделиться'}</button></div>
-            {task && <div className="map-task glass"><MapPin size={16} /><div><b>{task.stand}</b><span>{task.status === 'enroute' ? `в пути · ${mmss(task.eta_left)}` : task.status_ru}</span></div></div>}
+            <Suspense fallback={<div className="geo-map-loading glass">Загрузка карты…</div>}><GeoMap airport={airport} simulated={state.aircraft} simulatedTechs={state.techs} requests={state.active} importedAirport panelOpen={false} manageGps={false} /></Suspense>
+            <button className={cx('location-share-icon', sharingLocation && 'on', locationShareError && 'error')} aria-pressed={sharingLocation} aria-label={sharingLocation ? 'Остановить передачу геопозиции диспетчеру' : 'Поделиться геопозицией с диспетчером'} title={locationShareError || (sharingLocation ? gpsFix ? 'Геопозиция передаётся' : `GPS: ${gpsStatus}` : onShift ? 'Поделиться геопозицией' : 'Начните смену для передачи геопозиции')} disabled={!onShift && !sharingLocation} onClick={() => { setSharingLocation(value => !value); if (!sharingLocation) toast.info('Передача геопозиции включена. Ожидаем координаты GPS.'); }}><Navigation size={21} /><i /></button>
+            {task && <div className="map-task glass"><MapPin size={16} /><div><b>{navigationHint?.text || task.stand}</b><span>{task.status === 'enroute' ? `${task.travel_mode === 'vehicle' ? 'Спецтранспорт' : 'Пешком'} · ${Math.round(navigationHint?.remaining ?? 0)} м · ${mmss(task.eta_left)}` : task.status_ru}</span></div></div>}
           </div>
         )}
         {tab === 'chat' && <div className="eng-chat"><ChatView /></div>}
@@ -182,7 +211,7 @@ function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): v
     if (!next) return;
     if (next[0] === 'resolve') { setReport(true); return; }
     setBusy(true);
-    try { await act.engineerStep(r.id, next[0] as any); toast.ok(next[0] === 'arrive' ? 'Прибытие отмечено' : 'Работа начата'); await useOps.getState().reload(); }
+    try { if (next[0] === 'accept') await act.acceptRequest(r.id); else await act.engineerStep(r.id, next[0] as any); toast.ok(next[0] === 'arrive' ? 'Прибытие отмечено' : 'Работа начата'); await useOps.getState().reload(); }
     catch (e) { toast.bad(errorText(e)); }
     finally { setBusy(false); }
   }

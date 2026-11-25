@@ -126,7 +126,7 @@ Environment=HOST=127.0.0.1
 Environment=PORT=8001
 Environment=DB_FILE=${db_file}
 Environment=CHAT_STORAGE_DIR=${state}/chat-attachments
-Environment=AIRPORT_FILE=${app}/data/airport_sheremetyevo.json
+Environment=AIRPORT_FILE=${app}/data/airport_vdnh.json
 Environment=FRONTEND_DIR=${app}/frontend
 Environment=COOKIE_SECURE=1
 Environment=COOKIE_SAMESITE=None

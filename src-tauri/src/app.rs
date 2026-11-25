@@ -1,11 +1,11 @@
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(not(target_os = "android"))]
+use livekit::options::TrackPublishOptions;
 #[cfg(not(target_os = "android"))]
 use livekit::prelude::{
     LocalAudioTrack, LocalTrack, PlatformAudio, Room, RoomOptions, TrackSource,
 };
-#[cfg(not(target_os = "android"))]
-use livekit::options::TrackPublishOptions;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 #[cfg(not(target_os = "android"))]
 use std::ffi::{CStr, CString};
 #[cfg(not(target_os = "android"))]
@@ -410,9 +410,7 @@ async fn native_call_connect(
     // LiveKit's room event receiver must stay alive for the whole session.
     // Keep draining it in the background so WebKit is not involved in media
     // and the native room lifecycle remains active until the room closes.
-    tauri::async_runtime::spawn(async move {
-        while events.recv().await.is_some() {}
-    });
+    tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
     let microphone = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
     if let Err(error) = room
         .local_participant()
@@ -525,11 +523,9 @@ fn set_startup_view(app: tauri::AppHandle, startup_view: String) -> Result<(), S
 }
 
 #[tauri::command]
-fn load_airport_data(
-    _file: State<'_, AirportFile>,
-) -> Result<serde_json::Value, String> {
+fn load_airport_data(_file: State<'_, AirportFile>) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "android")]
-    let contents = include_str!("../../data/airport_sheremetyevo.json").to_owned();
+    let contents = include_str!("../../data/airport_vdnh.json").to_owned();
     #[cfg(not(target_os = "android"))]
     let contents = fs::read_to_string(&_file.0)
         .map_err(|e| format!("Не удалось прочитать карту аэропорта: {e}"))?;
@@ -570,7 +566,7 @@ fn project_root(app: &tauri::App) -> Result<PathBuf, String> {
     #[cfg(debug_assertions)]
     {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        if root.join("data/airport_sheremetyevo.json").is_file()
+        if root.join("data/airport_vdnh.json").is_file()
             && root.join("frontend/index.html").is_file()
         {
             return Ok(root.canonicalize().unwrap_or(root));
@@ -579,7 +575,7 @@ fn project_root(app: &tauri::App) -> Result<PathBuf, String> {
 
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
     for candidate in [resources.clone(), resources.join("ramppulse")] {
-        if candidate.join("data/airport_sheremetyevo.json").is_file()
+        if candidate.join("data/airport_vdnh.json").is_file()
             && candidate.join("frontend/index.html").is_file()
         {
             return Ok(candidate);
@@ -616,17 +612,24 @@ fn configured_server_url() -> Option<String> {
 }
 
 fn is_trusted_app_origin(url: &Url, remote_origin: Option<&str>) -> bool {
-    let local_app = url.scheme() == "http"
-        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
-    let tauri_app = matches!(url.as_str(), "http://tauri.localhost/" | "https://tauri.localhost/" | "tauri://localhost/")
-        || matches!(url.host_str(), Some("tauri.localhost"))
-            && matches!(url.scheme(), "http" | "https");
-    let trusted_remote = remote_origin
-        .is_some_and(|origin| url.origin().ascii_serialization() == origin);
+    let local_app =
+        url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"));
+    let tauri_app = matches!(
+        url.as_str(),
+        "http://tauri.localhost/" | "https://tauri.localhost/" | "tauri://localhost/"
+    ) || matches!(url.host_str(), Some("tauri.localhost"))
+        && matches!(url.scheme(), "http" | "https");
+    let trusted_remote =
+        remote_origin.is_some_and(|origin| url.origin().ascii_serialization() == origin);
     local_app || tauri_app || trusted_remote
 }
 
-fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String> {
+fn spawn_backend(
+    root: &Path,
+    db_path: &Path,
+    port: u16,
+    airport_file: &Path,
+) -> Result<Child, String> {
     let binary_name = if cfg!(windows) {
         "ramppulse-server.exe"
     } else {
@@ -639,7 +642,7 @@ fn spawn_backend(root: &Path, db_path: &Path, port: u16) -> Result<Child, String
     .into_iter()
     .find(|path| path.is_file())
     .ok_or_else(|| format!("В сборку RampPulse не вложен Rust-сервис ({binary_name})"))?;
-    let airport_file = root.join("data").join("airport_sheremetyevo.json");
+
     // Dev checkout serves the React build from web/dist; installed bundles ship it as `frontend/`.
     let frontend_dir = if root.join("web/dist/index.html").is_file() {
         root.join("web/dist")
@@ -717,7 +720,10 @@ fn consume_desktop_startup(state: State<'_, DesktopLaunchState>) -> bool {
 }
 
 fn append_diagnostic(path: &Path, message: &str) -> Result<(), String> {
-    if fs::metadata(path).map(|metadata| metadata.len() > 512 * 1024).unwrap_or(false) {
+    if fs::metadata(path)
+        .map(|metadata| metadata.len() > 512 * 1024)
+        .unwrap_or(false)
+    {
         fs::write(path, "RampPulse diagnostic log rotated\n").map_err(|error| error.to_string())?;
     }
     let timestamp = std::time::SystemTime::now()
@@ -836,9 +842,15 @@ pub fn run() {
             let root = project_root(app).map_err(std::io::Error::other)?;
             #[cfg(any(target_os = "android", feature = "client-only"))]
             let root = PathBuf::new();
-            app.manage(AirportFile(
-                root.join("data").join("airport_sheremetyevo.json"),
-            ));
+            let airport_file = std::env::var_os("AIRPORT_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    root.join("data").join(
+                        option_env!("RAMPULSE_BUNDLED_AIRPORT")
+                            .unwrap_or("airport_vdnh.json"),
+                    )
+                });
+            app.manage(AirportFile(airport_file.clone()));
             let data_dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
             std::fs::create_dir_all(&data_dir)?;
             let diagnostic_path = data_dir.join("diagnostics.log");
@@ -876,9 +888,7 @@ pub fn run() {
                 remote_base: remote_base.clone(),
             });
             app.manage(DesktopLaunchState(AtomicBool::new(true)));
-            let profile = data_dir
-                .join("webview-profiles")
-                .join("main");
+            let profile = data_dir.join("webview-profiles").join("main");
             std::fs::create_dir_all(&profile)?;
             let splash_config = app
                 .config()
@@ -903,19 +913,31 @@ pub fn run() {
                 })
                 .data_directory(profile)
                 .build()?;
-            let actual_url = window.url().map(|url| url.to_string()).unwrap_or_else(|_| "unknown".into());
-            let _ = append_diagnostic(&diagnostic_path, &format!("main window created url={actual_url}"));
+            let actual_url = window
+                .url()
+                .map(|url| url.to_string())
+                .unwrap_or_else(|_| "unknown".into());
+            let _ = append_diagnostic(
+                &diagnostic_path,
+                &format!("main window created url={actual_url}"),
+            );
 
             #[cfg(feature = "client-only")]
             {
-                let _ = append_diagnostic(&diagnostic_path, "client-only build: skipping local backend startup");
+                let _ = append_diagnostic(
+                    &diagnostic_path,
+                    "client-only build: skipping local backend startup",
+                );
                 // Client-only releases must always leave the native splash and load the UI.
                 // Some existing installations may retain the base config's splash URL.
                 if actual_url.ends_with("/splash.html") || actual_url.ends_with("splash.html") {
                     let ui_url = Url::parse("http://tauri.localhost/index.html")
                         .map_err(std::io::Error::other)?;
                     window.navigate(ui_url).map_err(std::io::Error::other)?;
-                    let _ = append_diagnostic(&diagnostic_path, "client-only splash detected; navigating to application UI");
+                    let _ = append_diagnostic(
+                        &diagnostic_path,
+                        "client-only splash detected; navigating to application UI",
+                    );
                 }
                 let _ = window.set_resizable(true);
                 return Ok(());
@@ -947,7 +969,7 @@ pub fn run() {
                     return;
                 }
                 let _ = app_handle.emit("service-status", json!({"stage": 1}));
-                let child = match spawn_backend(&root, &db_path, port) {
+                let child = match spawn_backend(&root, &db_path, port, &airport_file) {
                     Ok(child) => child,
                     Err(error) => {
                         let _ = app_handle.emit("service-error", json!({"message": error}));
@@ -1052,9 +1074,10 @@ fn open_secondary_session(
     .resizable(true)
     .maximized(true)
     .on_permission_request(move |webview, kind| {
-        let trusted = webview.url().ok().is_some_and(|url| {
-            is_trusted_app_origin(&url, trusted_remote_origin.as_deref())
-        });
+        let trusted = webview
+            .url()
+            .ok()
+            .is_some_and(|url| is_trusted_app_origin(&url, trusted_remote_origin.as_deref()));
         match kind {
             PermissionKind::Geolocation if trusted => PermissionResponse::Default,
             PermissionKind::Geolocation => PermissionResponse::Deny,

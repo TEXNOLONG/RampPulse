@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 export interface Prefs {
-  theme: 'aviation' | 'amber' | 'teal';
+  theme: 'aviation' | 'amber' | 'teal' | 'light';
   sound: boolean;
   desktopNotifications: boolean;
   reduceMotion: boolean;
@@ -30,7 +30,7 @@ const defaults: Prefs = {
 function load(): Prefs {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
-    const theme = ['aviation', 'amber', 'teal'].includes(saved.theme) ? saved.theme : defaults.theme;
+    const theme = ['aviation', 'amber', 'teal', 'light'].includes(saved.theme) ? saved.theme : defaults.theme;
     return { ...defaults, ...saved, theme };
   } catch { return defaults; }
 }

@@ -1,3 +1,5 @@
+#[path = "field_store.rs"]
+mod field_store;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::ops::{Deref, DerefMut};
@@ -242,6 +244,35 @@ impl AccountStore {
                 version INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_requests_status_tech ON requests(status, tech_id);
+            CREATE TABLE IF NOT EXISTS security_control(id INTEGER PRIMARY KEY CHECK(id=1),carpet INTEGER NOT NULL DEFAULT 0);
+            INSERT OR IGNORE INTO security_control VALUES(1,0);
+            CREATE TABLE IF NOT EXISTS client_devices(id TEXT PRIMARY KEY,last_user_id INTEGER NOT NULL,blocked INTEGER NOT NULL DEFAULT 0,last_seen TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS device_sessions(token_hash TEXT PRIMARY KEY REFERENCES rust_sessions(token_hash) ON DELETE CASCADE,device_id TEXT NOT NULL REFERENCES client_devices(id));
+            CREATE TABLE IF NOT EXISTS security_events(id INTEGER PRIMARY KEY,actor_id INTEGER NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS security_no_update BEFORE UPDATE ON security_events BEGIN SELECT RAISE(ABORT,'immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS security_no_delete BEFORE DELETE ON security_events BEGIN SELECT RAISE(ABORT,'immutable'); END;
+            CREATE TABLE IF NOT EXISTS qualifications(name TEXT PRIMARY KEY);
+            INSERT OR IGNORE INTO qualifications VALUES ('Планер'),('Двигатель'),('Авионика');
+            INSERT OR IGNORE INTO qualifications SELECT DISTINCT trim(qual) FROM users WHERE status='active' AND length(trim(qual))>0;
+            INSERT OR IGNORE INTO qualifications SELECT DISTINCT trim(qual) FROM requests WHERE length(trim(qual))>0 AND qual<>'auto';
+            CREATE TRIGGER IF NOT EXISTS catalog_request AFTER INSERT ON requests WHEN length(trim(NEW.qual))>0 BEGIN INSERT OR IGNORE INTO qualifications VALUES(trim(NEW.qual)); END;
+            CREATE TRIGGER IF NOT EXISTS catalog_user AFTER UPDATE ON users WHEN NEW.status='active' AND length(trim(NEW.qual))>0 BEGIN INSERT OR IGNORE INTO qualifications VALUES(trim(NEW.qual)); END;
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT NOT NULL UNIQUE,
+                request_id INTEGER, actor_id INTEGER, actor_role TEXT NOT NULL,
+                event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT,'audit is immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT,'audit is immutable'); END;
+            CREATE TABLE IF NOT EXISTS request_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL,
+                actor_id INTEGER NOT NULL, actor_role TEXT NOT NULL, event TEXT NOT NULL,
+                from_status TEXT, to_status TEXT, details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                FOREIGN KEY(request_id) REFERENCES requests(id)
+            );
+            CREATE TRIGGER IF NOT EXISTS request_history_no_update BEFORE UPDATE ON request_history BEGIN SELECT RAISE(ABORT,'request history is immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS request_history_no_delete BEFORE DELETE ON request_history BEGIN SELECT RAISE(ABORT,'request history is immutable'); END;
+            CREATE TABLE IF NOT EXISTS field_positions(kind TEXT NOT NULL,agent_id TEXT NOT NULL,observed_ms INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(kind,agent_id));
             CREATE TABLE IF NOT EXISTS technician_positions (
                 tech_id INTEGER PRIMARY KEY,
                 x REAL NOT NULL,
@@ -303,6 +334,39 @@ impl AccountStore {
                 SELECT 'shift','Общий канал смены',strftime('%Y-%m-%dT%H:%M:%fZ','now')
                 WHERE NOT EXISTS (SELECT 1 FROM chat_rooms WHERE kind='shift');"
         )?;
+        let mut request_columns = std::collections::HashSet::new();
+        {
+            let mut statement = connection.prepare("PRAGMA table_info(requests)")?;
+            for name in statement.query_map([], |row| row.get::<_, String>(1))? {
+                request_columns.insert(name?);
+            }
+        }
+        for (column, sql) in [
+            (
+                "via_json",
+                "ALTER TABLE requests ADD COLUMN via_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+            (
+                "ata_chapter",
+                "ALTER TABLE requests ADD COLUMN ata_chapter TEXT",
+            ),
+            (
+                "is_aog",
+                "ALTER TABLE requests ADD COLUMN is_aog INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "mel_category",
+                "ALTER TABLE requests ADD COLUMN mel_category TEXT",
+            ),
+            (
+                "assessment_set_by",
+                "ALTER TABLE requests ADD COLUMN assessment_set_by INTEGER",
+            ),
+        ] {
+            if !request_columns.contains(column) {
+                connection.execute(sql, [])?;
+            }
+        }
         migrate_attachment_limit(&connection)?;
         if let Some(table) = legacy_requests {
             let legacy_rows = {
@@ -479,6 +543,7 @@ impl AccountStore {
         &self,
         email: &str,
         password: &str,
+        device_id: Option<String>,
     ) -> Result<(PublicUser, String), AuthFailure> {
         let (user, encoded): (PublicUser, String) = {
             let connection = self.connection().map_err(|_| AuthFailure::Storage)?;
@@ -530,25 +595,43 @@ impl AccountStore {
             .map_err(|_| AuthFailure::Storage)?
             .as_secs() as i64
             + SESSION_TTL_SECONDS;
-        let connection = self.connection().map_err(|_| AuthFailure::Storage)?;
-        connection
-            .execute(
-                "DELETE FROM rust_sessions WHERE expires_at < strftime('%s','now')",
-                [],
+        let mut conn = self.connection().map_err(|_| AuthFailure::Storage)?;
+        let tx = conn.transaction().map_err(|_| AuthFailure::Storage)?;
+        let device = device_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let blocked: Option<bool> = tx
+            .query_row(
+                "SELECT blocked FROM client_devices WHERE id=?1",
+                [&device],
+                |r| r.get(0),
             )
+            .optional()
             .map_err(|_| AuthFailure::Storage)?;
-        connection
+        if blocked == Some(true) {
+            return Err(AuthFailure::Closed);
+        }
+        tx.execute(
+            "DELETE FROM rust_sessions WHERE expires_at < strftime('%s','now')",
+            [],
+        )
+        .map_err(|_| AuthFailure::Storage)?;
+        tx
             .execute(
                 "INSERT INTO rust_sessions(token_hash,user_id,created_at,expires_at) VALUES(?1,?2,?3,?4)",
                 params![token_hash, user.id, now, expires],
             )
             .map_err(|_| AuthFailure::Storage)?;
-        connection
-            .execute(
-                "UPDATE users SET last_login_at=?1 WHERE id=?2",
-                params![now, user.id],
-            )
-            .map_err(|_| AuthFailure::Storage)?;
+        tx.execute(
+            "UPDATE users SET last_login_at=?1 WHERE id=?2",
+            params![now, user.id],
+        )
+        .map_err(|_| AuthFailure::Storage)?;
+        tx.execute("INSERT INTO client_devices(id,last_user_id,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET last_user_id=excluded.last_user_id,last_seen=excluded.last_seen",params![device,user.id,now]).map_err(|_|AuthFailure::Storage)?;
+        tx.execute(
+            "INSERT INTO device_sessions VALUES(?1,?2)",
+            params![token_hash, device],
+        )
+        .map_err(|_| AuthFailure::Storage)?;
+        tx.commit().map_err(|_| AuthFailure::Storage)?;
         Ok((user, token))
     }
 
@@ -612,7 +695,12 @@ impl AccountStore {
     }
 
     /// Verifies the current password and stores a new one. `Ok(false)` = wrong password.
-    pub fn change_password(&self, user_id: i64, current: &str, new: &str) -> rusqlite::Result<bool> {
+    pub fn change_password(
+        &self,
+        user_id: i64,
+        current: &str,
+        new: &str,
+    ) -> rusqlite::Result<bool> {
         let connection = self.connection()?;
         let encoded: String = connection.query_row(
             "SELECT password_hash FROM users WHERE id=?1",
@@ -787,55 +875,20 @@ impl AccountStore {
     pub fn create_request(
         &self,
         new: NewRequest,
-        ranked_technicians: &[(i64, f64)],
-        requested_tech_id: Option<i64>,
+        _candidate_ms: u128,
     ) -> rusqlite::Result<RequestRecord> {
         let now = now_rfc3339();
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
-        // Route ranking comes from the shared Rust airport graph. This transaction still makes
-        // the final availability check authoritative so two simultaneous requests cannot claim
-        // the same engineer.
-        let mut statement = tx.prepare(
-            "SELECT u.tech_id,u.name FROM users u
-             WHERE u.role='engineer' AND u.status='active' AND u.on_shift=1 AND u.tech_id IS NOT NULL
-               AND (?1='auto' OR u.qual=?1)
-               AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.tech_id=u.tech_id
-                 AND r.status NOT IN ('done','cancelled'))
-             ORDER BY u.tech_id",
-        )?;
-        let eligible = statement
-            .query_map([&new.qual], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        let eta_by_technician: std::collections::HashMap<i64, f64> =
-            ranked_technicians.iter().copied().collect();
-        let emergency = matches!(new.priority.as_str(), "critical" | "emergency");
-        let assigned = if let Some(requested_id) = requested_tech_id {
-            ranked_technicians.iter().find(|(id, _)| *id == requested_id)
-                .and_then(|_| eligible.iter().find(|(id, _)| *id == requested_id).cloned())
-        } else {
-            ranked_technicians
-                .iter()
-                .filter(|(_, eta)| emergency || *eta <= 900.0)
-                .find_map(|(tech_id, _)| eligible.iter().find(|(eligible_id, _)| eligible_id == tech_id).cloned())
-        };
-        if requested_tech_id.is_some() && assigned.is_none() {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let assigned = assigned.filter(|(id, _)| eta_by_technician.contains_key(id));
-        let (tech_id, tech_name, status) = match assigned {
-            Some((id, name)) => (Some(id), name, "enroute"),
-            None => (None, "Автоподбор".to_owned(), "waiting"),
-        };
+        let (tech_id, tech_name, status) = (None::<i64>, "Unassigned".to_owned(), "waiting");
         tx.execute(
-            "INSERT INTO requests(stand,description,qual,extra,priority,tech_id,tech_name,status,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![new.stand,new.description,new.qual,new.extra,new.priority,tech_id,tech_name,status,now],
+            "INSERT INTO requests(stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,via_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![new.stand,new.description,new.qual,new.extra,new.priority,tech_id,tech_name,status,now,serde_json::json!(new.via).to_string()],
         )?;
         let id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,details,created_at) VALUES(?1,?2,?3,'crew_remark',?4,?5)", params![id,new.actor_id,new.actor_role,serde_json::json!({"source":"dispatcher","measurement":"recorded_in_candidates_formed"}).to_string(),now])?;
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,to_status,created_at) VALUES(?1,?2,?3,'created','waiting',?4)", params![id,new.actor_id,new.actor_role,now])?;
         tx.commit()?;
         drop(connection);
         self.request_by_id(id)
@@ -846,17 +899,36 @@ impl AccountStore {
         if user.role == "engineer" {
             let mut statement=connection.prepare(
                 "SELECT r.id,r.stand,r.description,r.qual,r.extra,r.priority,r.tech_id,r.tech_name,r.status,
-                 r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version
-                 FROM requests r WHERE r.tech_id=?1 OR r.status='waiting' ORDER BY r.id DESC"
+                 r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json
+                 FROM requests r WHERE r.tech_id=?1 ORDER BY r.id DESC"
             )?;
             let rows = statement.query_map([user.tech_id.unwrap_or(user.id)], read_request)?;
             return rows.collect();
         }
         let mut statement=connection.prepare(
             "SELECT r.id,r.stand,r.description,r.qual,r.extra,r.priority,r.tech_id,r.tech_name,r.status,
-             r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version FROM requests r ORDER BY r.id DESC"
+             r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json FROM requests r ORDER BY r.id DESC"
         )?;
         let rows = statement.query_map([], read_request)?;
+        rows.collect()
+    }
+
+    pub fn open_requests_for_reassignment(&self) -> rusqlite::Result<Vec<RequestRecord>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json
+             FROM requests WHERE status IN ('assigned','enroute') ORDER BY id",
+        )?;
+        let rows = statement.query_map([], read_request)?;
+        rows.collect()
+    }
+
+    pub fn occupied_technician_ids(&self) -> rusqlite::Result<Vec<i64>> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT tech_id FROM requests WHERE tech_id IS NOT NULL AND status NOT IN ('done','cancelled')",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
         rows.collect()
     }
 
@@ -1205,34 +1277,54 @@ impl AccountStore {
     }
     pub fn push_tokens(&self, user_id: i64) -> rusqlite::Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT token FROM push_devices WHERE user_id=?1")?;
+        let mut statement =
+            connection.prepare("SELECT token FROM push_devices WHERE user_id=?1")?;
         let rows = statement.query_map([user_id], |row| row.get(0))?.collect();
         rows
     }
     pub fn unregister_push_device(&self, user_id: i64, token: &str) -> rusqlite::Result<()> {
-        self.connection()?.execute("DELETE FROM push_devices WHERE token=?1 AND user_id=?2", params![token,user_id])?;
+        self.connection()?.execute(
+            "DELETE FROM push_devices WHERE token=?1 AND user_id=?2",
+            params![token, user_id],
+        )?;
         Ok(())
     }
     pub fn remove_push_device(&self, token: &str) -> rusqlite::Result<()> {
-        self.connection()?.execute("DELETE FROM push_devices WHERE token=?1", [token])?;
+        self.connection()?
+            .execute("DELETE FROM push_devices WHERE token=?1", [token])?;
         Ok(())
     }
-    pub fn save_call_invite(&self, call_id: &str, caller: i64, recipient: i64, payload: &serde_json::Value) -> rusqlite::Result<()> {
+    pub fn save_call_invite(
+        &self,
+        call_id: &str,
+        caller: i64,
+        recipient: i64,
+        payload: &serde_json::Value,
+    ) -> rusqlite::Result<()> {
         let connection = self.connection()?;
-        let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64 + 90;
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            + 90;
         connection.execute("INSERT OR REPLACE INTO call_invites(call_id,caller_id,recipient_id,payload,expires_at) VALUES(?1,?2,?3,?4,?5)", params![call_id,caller,recipient,payload.to_string(),expiry])?;
         Ok(())
     }
     pub fn pending_call_invites(&self, user_id: i64) -> rusqlite::Result<Vec<serde_json::Value>> {
         let connection = self.connection()?;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         connection.execute("DELETE FROM call_invites WHERE expires_at<=?1", [now])?;
         let mut statement = connection.prepare("SELECT payload FROM call_invites WHERE recipient_id=?1 AND expires_at>?2 ORDER BY expires_at DESC")?;
-        let rows = statement.query_map(params![user_id,now], |row| row.get::<_,String>(0))?;
-        rows.map(|row| Ok(serde_json::from_str(&row?).unwrap_or(serde_json::Value::Null))).collect()
+        let rows = statement.query_map(params![user_id, now], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?).unwrap_or(serde_json::Value::Null)))
+            .collect()
     }
     pub fn clear_call_invite(&self, call_id: &str) -> rusqlite::Result<()> {
-        self.connection()?.execute("DELETE FROM call_invites WHERE call_id=?1", [call_id])?;
+        self.connection()?
+            .execute("DELETE FROM call_invites WHERE call_id=?1", [call_id])?;
         Ok(())
     }
 
@@ -1301,6 +1393,16 @@ impl AccountStore {
         next: &str,
         user: &PublicUser,
     ) -> rusqlite::Result<RequestRecord> {
+        self.transition_request_with_confirmation(id, next, user, false)
+    }
+
+    pub fn transition_request_with_confirmation(
+        &self,
+        id: i64,
+        next: &str,
+        user: &PublicUser,
+        confirm_shift_lead: bool,
+    ) -> rusqlite::Result<RequestRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
         let current = query_request(&tx, id)?;
@@ -1309,7 +1411,8 @@ impl AccountStore {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         let valid = match (current.status.as_str(), next) {
-            ("waiting", "enroute" | "cancelled") => true,
+            ("waiting", "cancelled") => true,
+            ("assigned", "enroute" | "arrived" | "cancelled") => true,
             ("enroute", "arrived" | "cancelled") => true,
             ("arrived", "working" | "cancelled") => true,
             ("working", "done" | "cancelled") => true,
@@ -1319,6 +1422,18 @@ impl AccountStore {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if user.role == "engineer" && !matches!(next, "enroute" | "arrived" | "working" | "done") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if user.role == "dispatcher"
+            && current.status == "working"
+            && next == "cancelled"
+            && !confirm_shift_lead
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if confirm_shift_lead
+            && !(user.role == "dispatcher" && current.status == "working" && next == "cancelled")
+        {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let now = now_rfc3339();
@@ -1333,9 +1448,97 @@ impl AccountStore {
              started_at=COALESCE(?3,started_at),resolved_at=COALESCE(?4,resolved_at),version=version+1 WHERE id=?5",
             params![next,arrived,started,resolved,id],
         )?;
+        let details = (current.status == "working" && next == "cancelled" && confirm_shift_lead)
+            .then(|| "confirmed_by_shift_lead".to_owned());
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,from_status,to_status,details,created_at) VALUES(?1,?2,?3,'status_changed',?4,?5,?6,?7)", params![id,user.id,user.role,current.status,next,details.unwrap_or_default(),now])?;
         tx.commit()?;
         drop(connection);
         self.request_by_id(id)
+    }
+
+    pub fn assign_request(
+        &self,
+        id: i64,
+        tech_id: i64,
+        actor: &PublicUser,
+        confirm: bool,
+    ) -> rusqlite::Result<RequestRecord> {
+        if !matches!(actor.role.as_str(), "dispatcher" | "system") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        if tx.query_row("SELECT carpet FROM security_control WHERE id=1", [], |r| {
+            r.get::<_, bool>(0)
+        })? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let current = query_request(&tx, id)?;
+        if current.status == "working" && !confirm {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if !matches!(
+            current.status.as_str(),
+            "waiting" | "assigned" | "enroute" | "arrived" | "working"
+        ) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if current.tech_id == Some(tech_id) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let (name, active): (String, i64) = tx.query_row("SELECT name,on_shift FROM users WHERE role='engineer' AND tech_id=?1 AND status='active' AND qual=?2", params![tech_id,current.qual], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        if active == 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM requests WHERE tech_id=?1 AND status NOT IN ('done','cancelled') AND id<>?2)", params![tech_id,id], |r| r.get(0))?;
+        if busy {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let now = now_rfc3339();
+        tx.execute("UPDATE requests SET tech_id=?1,tech_name=?2,status='enroute',arrived_at=NULL,started_at=NULL,resolved_at=NULL,version=version+1 WHERE id=?3", params![tech_id,name,id])?;
+        let event = if actor.role == "system" {
+            "auto_reassigned"
+        } else if current.tech_id.is_some() {
+            "reassigned"
+        } else {
+            "assigned"
+        };
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,from_status,to_status,details,created_at) VALUES(?1,?2,?3,?4,?5,'enroute',?6,?7)", params![id,actor.id,actor.role,event,current.status,serde_json::json!({"tech_id":tech_id,"tech_name":name,"previous_tech_id":current.tech_id,"confirmed_by_shift_lead":current.status=="working" && confirm}).to_string(),now])?;
+        if actor.role == "dispatcher" {
+            let content = format!("Назначение заявки №{}: {} → {}. {}", id, name, current.stand, current.description);
+            tx.execute(
+                "INSERT INTO chat_messages(room_id,sender_id,message_kind,content,created_at) SELECT id,?1,'text',?2,?3 FROM chat_rooms WHERE kind='shift' ORDER BY id LIMIT 1",
+                params![actor.id, content, now],
+            )?;
+        }
+        tx.commit()?;
+        drop(connection);
+        self.request_by_id(id)
+    }
+
+    pub fn auto_reassign_request(&self, id: i64, tech_id: i64) -> rusqlite::Result<RequestRecord> {
+        self.assign_request(
+            id,
+            tech_id,
+            &PublicUser {
+                id: 0,
+                email: String::new(),
+                username: "system".into(),
+                bio: String::new(),
+                avatar_color: String::new(),
+                name: "Автораспределение".into(),
+                role: "system".into(),
+                status: "active".into(),
+                qual: None,
+                types: Vec::new(),
+                base: None,
+                tech_id: None,
+                on_shift: true,
+                created_at: String::new(),
+                approved_at: None,
+            },
+            false,
+        )
     }
 
     pub fn set_shift(&self, user_id: i64, on_shift: bool) -> Result<PublicUser, ShiftFailure> {
@@ -1372,18 +1575,116 @@ impl AccountStore {
         self.user_by_id(user_id).map_err(|_| ShiftFailure::Storage)
     }
 
+    pub fn carpet_active(&self) -> rusqlite::Result<bool> {
+        self.connection()?
+            .query_row("SELECT carpet FROM security_control WHERE id=1", [], |r| {
+                r.get(0)
+            })
+    }
+
+    pub fn security_status(&self) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.connection()?;
+        let mut q = conn.prepare("SELECT d.id,u.name,d.blocked,d.last_seen FROM client_devices d JOIN users u ON u.id=d.last_user_id ORDER BY d.last_seen DESC")?;
+        let rows = q.query_map([], |r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"user":r.get::<_,String>(1)?,"blocked":r.get::<_,bool>(2)?,"last_seen":r.get::<_,String>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let carpet: bool =
+            conn.query_row("SELECT carpet FROM security_control WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+        Ok(serde_json::json!({"carpet":carpet,"devices":rows}))
+    }
+
+    pub fn security_change(
+        &self,
+        actor: i64,
+        device: Option<String>,
+        enabled: bool,
+        token: &str,
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let target = device.as_deref().unwrap_or("map");
+        let action = if let Some(id) = &device {
+            let own: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_sessions WHERE token_hash=?1 AND device_id=?2)",
+                params![hash_session_token(token), id],
+                |r| r.get(0),
+            )?;
+            if own && enabled {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            if tx.execute(
+                "UPDATE client_devices SET blocked=?1 WHERE id=?2",
+                params![enabled, id],
+            )? == 0
+            {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            if enabled {
+                tx.execute("DELETE FROM rust_sessions WHERE token_hash IN(SELECT token_hash FROM device_sessions WHERE device_id=?1)",[id])?;
+                "device_block"
+            } else {
+                "device_unblock"
+            }
+        } else {
+            tx.execute(
+                "UPDATE security_control SET carpet=?1 WHERE id=1",
+                [enabled],
+            )?;
+            if enabled {
+                "carpet_on"
+            } else {
+                "carpet_off"
+            }
+        };
+        tx.execute(
+            "INSERT INTO security_events(actor_id,action,target,created_at) VALUES(?1,?2,?3,?4)",
+            params![actor, action, target, now_rfc3339()],
+        )?;
+        tx.commit()
+    }
+
+    pub fn qualifications(&self) -> rusqlite::Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut stmt = connection.prepare("SELECT name FROM qualifications ORDER BY name")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    pub fn append_audit(&self, key: &str, request_id: Option<i64>, event: &str, details: &serde_json::Value) -> rusqlite::Result<()> {
+        self.connection()?.execute(
+            "INSERT OR IGNORE INTO audit_log(event_key,request_id,actor_id,actor_role,event,details,created_at) VALUES(?1,?2,NULL,'system',?3,?4,?5)",
+            params![key, request_id, event, details.to_string(), now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn journal(&self) -> rusqlite::Result<Vec<Vec<String>>> {
+        let connection = self.connection()?;
+        let mut stmt = connection.prepare("SELECT * FROM (SELECT created_at,CAST(request_id AS TEXT),CAST(actor_id AS TEXT),actor_role,event,coalesce(from_status,''),coalesce(to_status,''),details FROM request_history UNION ALL SELECT created_at,'',CAST(actor_id AS TEXT),'security',action,'','',target FROM security_events UNION ALL SELECT created_at,coalesce(CAST(request_id AS TEXT),''),coalesce(CAST(actor_id AS TEXT),''),actor_role,event,'','',details FROM audit_log) ORDER BY julianday(created_at),created_at")?;
+        let rows = stmt.query_map([], |row| (0..8).map(|i| row.get(i)).collect())?;
+        rows.collect()
+    }
+
     fn request_by_id(&self, id: i64) -> rusqlite::Result<RequestRecord> {
         let connection = self.connection()?;
         connection.query_row(
-            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version FROM requests WHERE id=?1",
+            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json FROM requests WHERE id=?1",
             [id], read_request,
         )
     }
 }
 
 fn migrate_attachment_limit(connection: &rusqlite::Connection) -> rusqlite::Result<()> {
-    let sql: Option<String> = connection.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_attachments'", [], |row| row.get(0)).optional()?;
-    if !sql.is_some_and(|value| value.contains("15728640")) { return Ok(()); }
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='chat_attachments'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !sql.is_some_and(|value| value.contains("15728640")) {
+        return Ok(());
+    }
     connection.pragma_update(None, "foreign_keys", false)?;
     let result = connection.execute_batch("BEGIN IMMEDIATE;
         DROP INDEX IF EXISTS idx_chat_messages_room_id; DROP INDEX IF EXISTS idx_chat_attachments_room;
@@ -1395,13 +1696,18 @@ fn migrate_attachment_limit(connection: &rusqlite::Connection) -> rusqlite::Resu
         INSERT INTO chat_messages SELECT * FROM chat_messages_legacy;
         DROP TABLE chat_messages_legacy; DROP TABLE chat_attachments_legacy;
         CREATE INDEX idx_chat_attachments_room ON chat_attachments(room_id,created_at); CREATE INDEX idx_chat_messages_room_id ON chat_messages(room_id,id); COMMIT;");
-    if result.is_err() { let _ = connection.execute_batch("ROLLBACK;"); }
+    if result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
     let restore = connection.pragma_update(None, "foreign_keys", true);
-    result?; restore?; Ok(())
+    result?;
+    restore?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestRecord {
+    pub via: Vec<String>,
     pub id: i64,
     pub stand: String,
     pub description: String,
@@ -1423,6 +1729,9 @@ pub struct RequestRecord {
 }
 
 pub struct NewRequest {
+    pub via: Vec<String>,
+    pub actor_id: i64,
+    pub actor_role: String,
     pub stand: String,
     pub description: String,
     pub qual: String,
@@ -1532,6 +1841,8 @@ fn room_recipients(
 fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
     let status: String = row.get(8)?;
     Ok(RequestRecord {
+        via: serde_json::from_str(&row.get::<_, String>(14)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
         id: row.get(0)?,
         stand: row.get(1)?,
         description: row.get(2)?,
@@ -1563,9 +1874,176 @@ fn request_status_ru(status: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatcher() -> PublicUser {
+        PublicUser {
+            id: 1,
+            email: "dispatcher@oto.ru".into(),
+            username: "dispatcher".into(),
+            bio: String::new(),
+            avatar_color: String::new(),
+            name: "Диспетчер".into(),
+            role: "dispatcher".into(),
+            status: "active".into(),
+            qual: None,
+            types: Vec::new(),
+            base: None,
+            tech_id: None,
+            on_shift: true,
+            created_at: String::new(),
+            approved_at: None,
+        }
+    }
+
+    fn request(store: &AccountStore, via: Vec<String>) -> RequestRecord {
+        store
+            .create_request(
+                NewRequest {
+                    via,
+                    actor_id: 1,
+                    actor_role: "dispatcher".into(),
+                    stand: "C31".into(),
+                    description: "Проверка гидравлики".into(),
+                    qual: "Планер".into(),
+                    extra: String::new(),
+                    priority: "normal".into(),
+                },
+                0,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn persists_waypoints_and_new_qualifications() {
+        let store = AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        let stops = vec!["N1".into(), "N2".into()];
+        let created = request(&store, stops.clone());
+        assert_eq!(created.via, stops);
+
+        let pending = store
+            .register_engineer(NewEngineer {
+                email: "new-qual@example.test".into(),
+                username: "new_qual".into(),
+                name: "Новый специалист".into(),
+                password: "LongEnoughPassword1!".into(),
+                qual: "Наземное оборудование".into(),
+                types: Vec::new(),
+                base: "BASE1".into(),
+            })
+            .unwrap();
+        store.approve_engineer(pending.id).unwrap();
+        assert!(store
+            .qualifications()
+            .unwrap()
+            .contains(&"Наземное оборудование".into()));
+    }
+
+    #[test]
+    fn system_reassignment_records_audit_and_respects_assignment_rules() {
+        let store = AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        let pending = store
+            .register_engineer(NewEngineer {
+                email: "second-tech@example.test".into(),
+                username: "second_tech".into(),
+                name: "Второй инженер".into(),
+                password: "LongEnoughPassword1!".into(),
+                qual: "Планер".into(),
+                types: vec!["A320".into()],
+                base: "BASE2".into(),
+            })
+            .unwrap();
+        let replacement = store.approve_engineer(pending.id).unwrap();
+        assert!(matches!(store.set_shift(replacement.id, true), Ok(_)));
+        let created = request(&store, Vec::new());
+        let assigned = store
+            .assign_request(created.id, 1, &dispatcher(), false)
+            .unwrap();
+        assert_eq!(assigned.tech_id, Some(1));
+        assert!(store
+            .auto_reassign_request(created.id, replacement.tech_id.unwrap())
+            .is_ok());
+        assert!(store
+            .auto_reassign_request(created.id, replacement.tech_id.unwrap())
+            .is_err());
+        assert!(store
+            .journal()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|cell| cell == "auto_reassigned"));
+    }
+
+    #[test]
+    fn request_progression_blocks_dispatcher_cancellation_after_work_starts() {
+        let store = AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        let created = request(&store, Vec::new());
+        store
+            .assign_request(created.id, 1, &dispatcher(), false)
+            .unwrap();
+        let engineer = store
+            .active_engineers()
+            .unwrap()
+            .into_iter()
+            .find(|user| user.tech_id == Some(1))
+            .unwrap();
+        store
+            .transition_request(created.id, "enroute", &engineer)
+            .unwrap();
+        store
+            .transition_request(created.id, "arrived", &engineer)
+            .unwrap();
+        store
+            .transition_request(created.id, "working", &engineer)
+            .unwrap();
+        assert!(store
+            .transition_request(created.id, "cancelled", &dispatcher())
+            .is_err());
+        assert_eq!(
+            store
+                .transition_request(created.id, "done", &engineer)
+                .unwrap()
+                .status,
+            "done"
+        );
+
+        let second = request(&store, Vec::new());
+        store
+            .assign_request(second.id, 1, &dispatcher(), false)
+            .unwrap();
+        store
+            .transition_request(second.id, "enroute", &engineer)
+            .unwrap();
+        store
+            .transition_request(second.id, "arrived", &engineer)
+            .unwrap();
+        store
+            .transition_request(second.id, "working", &engineer)
+            .unwrap();
+        assert_eq!(
+            store
+                .transition_request_with_confirmation(second.id, "cancelled", &dispatcher(), true)
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        assert!(store
+            .journal()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|cell| cell == "confirmed_by_shift_lead"));
+    }
+}
+
 fn query_request(connection: &rusqlite::Connection, id: i64) -> rusqlite::Result<RequestRecord> {
     connection.query_row(
-        "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version FROM requests WHERE id=?1",
+        "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json FROM requests WHERE id=?1",
         [id], read_request,
     )
 }

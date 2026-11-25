@@ -9,8 +9,8 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-const DEFAULT_LAT: f64 = 55.97278;
-const DEFAULT_LON: f64 = 37.41472;
+const DEFAULT_LAT: f64 = 55.8330053;
+const DEFAULT_LON: f64 = 37.628713;
 const DEFAULT_RADIUS_NM: u16 = 50;
 const DEFAULT_POLL_SECONDS: u64 = 180;
 
@@ -146,7 +146,13 @@ impl AviationService {
         let key = format!("{:.2}:{:.2}", latitude, longitude);
         let mut caches = self.0.cache.lock().await;
         if caches.len() >= 8 && !caches.contains_key(&key) {
-            if let Some(oldest) = caches.iter().min_by_key(|(_, cache)| cache.fetched_at).map(|(key, _)| key.clone()) { caches.remove(&oldest); }
+            if let Some(oldest) = caches
+                .iter()
+                .min_by_key(|(_, cache)| cache.fetched_at)
+                .map(|(key, _)| key.clone())
+            {
+                caches.remove(&oldest);
+            }
         }
         let cache = caches.entry(key).or_default();
         cache.center = [latitude, longitude];
@@ -201,28 +207,27 @@ impl AviationService {
             request = request.header("x-api-key", key);
         }
         match request.send().await {
-            Ok(response) if response.status().is_success() => match response
-                .json::<AdsbResponse>()
-                .await
-            {
-                Ok(data) => {
-                    let now_ms = data.now.unwrap_or_else(unix_ms);
-                    let mut seen = HashSet::new();
-                    cache.aircraft = data
-                        .ac
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|record| map_record(record, now_ms))
-                        .filter(|record| seen.insert(record.icao24.clone()))
-                        .collect();
-                    cache.fetched_at = Some(Instant::now());
-                    cache.retry_not_before = None;
-                    cache.fetched_at_ms = Some(now_ms);
-                    cache.last_error = None;
-                    self.response(&cache, "LIVE", Some(0), None)
+            Ok(response) if response.status().is_success() => {
+                match response.json::<AdsbResponse>().await {
+                    Ok(data) => {
+                        let now_ms = data.now.unwrap_or_else(unix_ms);
+                        let mut seen = HashSet::new();
+                        cache.aircraft = data
+                            .ac
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|record| map_record(record, now_ms))
+                            .filter(|record| seen.insert(record.icao24.clone()))
+                            .collect();
+                        cache.fetched_at = Some(Instant::now());
+                        cache.retry_not_before = None;
+                        cache.fetched_at_ms = Some(now_ms);
+                        cache.last_error = None;
+                        self.response(&cache, "LIVE", Some(0), None)
+                    }
+                    Err(_) => self.failed(cache, "The aircraft provider returned invalid JSON."),
                 }
-                Err(_) => self.failed(cache, "The aircraft provider returned invalid JSON."),
-            },
+            }
             Ok(response) => {
                 let status = response.status();
                 let retry_after = response
@@ -278,7 +283,13 @@ impl AviationService {
             license: "ODbL-1.0",
             status,
             enabled: self.0.enabled,
-            airport: if (cache.center[0] - self.0.latitude).abs() < 0.01 && (cache.center[1] - self.0.longitude).abs() < 0.01 { "UUEE / SVO".into() } else { "Custom map center".into() },
+            airport: if (cache.center[0] - self.0.latitude).abs() < 0.01
+                && (cache.center[1] - self.0.longitude).abs() < 0.01
+            {
+                "VDNH / VDN".into()
+            } else {
+                "Custom map center".into()
+            },
             center: cache.center,
             radius_nm: self.0.radius_nm,
             fetched_at_ms: cache.fetched_at_ms,

@@ -251,11 +251,12 @@ function AppearanceTab() {
     { value: 'aviation', label: 'Авиационная', color: '#050505' },
     { value: 'amber', label: 'Янтарная', color: '#e7a43d' },
     { value: 'teal', label: 'Бирюзовая', color: '#36c2ae' },
+    { value: 'light', label: 'Светлая', color: '#f4f6f8' },
   ] as const;
   return (
     <div className="stack">
       <div className="theme-setting">
-        <div><b>Цветовая тема</b><span>Акцент и тон интерфейса на этом устройстве</span></div>
+        <div><b>Цветовая тема</b><span>Светлое или тёмное оформление на этом устройстве</span></div>
         <div className="theme-picker" role="group" aria-label="Цветовая тема">
           {themes.map(theme => <button key={theme.value} type="button" className={cx('theme-choice', p.theme === theme.value && 'selected')} aria-pressed={p.theme === theme.value} onClick={() => p.set({ theme: theme.value })}>
             <i style={{ background: theme.color }} /><span>{theme.label}</span>

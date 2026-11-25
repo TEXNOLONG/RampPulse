@@ -1,0 +1,73 @@
+/* Shared application layout. Map layers stay inside the map surface. */
+.location-share-icon{position:absolute;top:12px;right:12px;z-index:30;display:grid;place-items:center;width:44px;height:44px;border:1px solid var(--line-2);border-radius:50%;background:var(--bg-1);color:var(--text-2);box-shadow:var(--shadow-1)}
+.location-share-icon.on{color:var(--green-2);border-color:var(--green);background:var(--bg-1)}
+.location-share-icon i{display:none;position:absolute;right:2px;bottom:2px;width:9px;height:9px;border:2px solid var(--bg-1);border-radius:50%;background:var(--green)}
+.location-share-icon.on i{display:block}.location-share-icon.error{color:var(--red-2);border-color:var(--red)}.location-share-icon.error i{background:var(--red)}
+.geo-toolbar,.geo-weather-panel,.geo-tools,.geo-gps-card,.geo-aircraft-card{background:var(--bg-1)}
+.geo-weather-toggle,.geo-weather-toggle.on,.geo-weather-toggle.live,.geo-weather-toggle:hover{background:var(--bg-1);color:var(--text-2);box-shadow:var(--shadow-1)}
+.geo-weather-toggle.on{border-color:var(--text-3)}
+.geo-layer-list button,.geo-layer-list button.on{background:var(--bg-2);color:var(--text-2);border-color:var(--line-2)}
+:root[data-theme="light"] .geo-layer-list button.on{background:#e5efea;color:#285d48;border-color:#a9c4b5}
+:root[data-theme="light"] .geo-feed-status.live{color:#287652}
+:root[data-theme="light"] .geo-weather-current,:root[data-theme="light"] .geo-weather-metric,:root[data-theme="light"] .geo-weather-sources{background:#f1f5f7}
+.geo-feed-status{width:auto;height:auto;background:none;border-radius:0}.geo-feed-status.on{background:none}
+.geo-map-stage.weather-open .geo-toolbar,.geo-map-stage.weather-open .geo-tools{visibility:hidden;pointer-events:none}
+:root{--r:10px;--r-lg:12px;--r-xl:14px;--r-2xl:16px;--glass:var(--bg-1);--glass-strong:var(--bg-1);--shadow-1:0 2px 8px rgba(0,0,0,.1);--shadow-2:0 12px 36px rgba(0,0,0,.2)}
+.glass,.modal,.sheet,.eng-bar,.tabbar{backdrop-filter:none;-webkit-backdrop-filter:none}
+.btn,.btn-lg,.btn-sm,.icon-btn,.chip,.chip-btn,.sim,.sim-btn,.geo-mode-btn,.tabs,.tabs button,.segmented,.segmented button{border-radius:8px;box-shadow:none}
+.btn-primary{background:var(--text);color:var(--bg);border-color:var(--text);box-shadow:none}
+.btn-primary:not(:disabled):hover{background:var(--text-2);color:var(--bg);border-color:var(--text-2)}
+.btn-success{background:var(--green);color:#fff;box-shadow:none}
+.req,.task,.card-block,.setting-row,.theme-setting,.shift-card,.profile-card{border-radius:12px;box-shadow:none;background:var(--raise)}
+.req.sel{border-color:var(--text-3);box-shadow:inset 3px 0 var(--text-2);background:var(--raise-2)}
+.req::before{box-shadow:none}.live.on,.conn.off,.geo-feed-status.live i,.geo-weather-toggle.live>i{animation:none;box-shadow:none}
+.workspace{isolation:isolate}
+.cmdbar{min-height:68px;border-radius:12px;gap:12px}
+.cmd-title{min-width:130px;flex:1 1 170px}.cmd-title .eyebrow{max-width:100%;font-size:10px;letter-spacing:.04em}
+.cmd-stats{flex:0 1 auto;gap:16px}.stat{flex:1;min-width:64px}.stat b{font-size:18px}.stat span{font-size:11px}
+.demobar{right:14px;align-items:center}.compare{border-radius:8px;font-size:12px}.compare-note{height:auto;min-height:38px}
+.detail{z-index:60;background:var(--bg-1);border-radius:12px}.chat-panel{animation:none}
+.geo-toolbar{width:fit-content;max-width:calc(100% - 28px);right:auto;gap:8px 14px;border-radius:10px}
+.geo-layer-list{flex-wrap:wrap;min-width:0;gap:6px}.geo-layer-list button{min-height:34px;letter-spacing:0}
+.geo-feed-status,.geo-mode-label{font-size:11px;line-height:1.4;letter-spacing:0}.geo-mode-label{font-weight:600}
+.geo-weather-toggle{height:44px;min-height:44px;border-radius:10px;bottom:64px;white-space:nowrap}
+.geo-weather-toggle>svg{width:18px;height:18px;position:static;flex:none;transform:none}.geo-weather-toggle>span{letter-spacing:0;font:500 13px var(--font)}
+.geo-weather-toggle>i{flex:none}.geo-tools{border-radius:10px;transform:translateY(-50%)}
+.geo-attribution{top:auto;bottom:116px;left:14px;right:auto;max-width:calc(100% - 80px);background:var(--bg-1);font-size:9px}
+.legend{max-width:calc(100% - 100px);height:auto;min-height:36px;flex-wrap:wrap;gap:8px 14px;padding:8px 12px;border-radius:8px}
+.geo-weather-panel{top:190px;bottom:64px;border-radius:12px}.geo-aircraft-card{top:220px;max-height:calc(100% - 290px);overflow:auto}
+.msg-name{color:var(--text-2)}.msg-row.own .msg-name{color:rgba(255,255,255,.8)}
+.bubble{border-radius:12px}.messages{background:var(--bg-2)}.day-sep span{background:var(--raise)}
+.eng-bar,.tabbar{background:var(--bg-1)}.eng{height:100dvh}.eng-bar{flex:none}.eng-main{overflow:hidden}.eng-scroll{padding:16px;gap:16px}
+.task{background:var(--raise);border:1px solid var(--line-2)}.task.em{background:var(--raise);border-color:var(--red);box-shadow:none}
+.task-head h2{font-size:34px}.task-desc{font-size:15px}.task-facts div{background:var(--bg-2)}.task-facts b{font-size:13px;overflow-wrap:anywhere}
+.eng-map{isolation:isolate}.eng-map .geo-toolbar{top:76px}.eng-map .geo-weather-panel{top:76px}
+.eng-map .map-task{z-index:30;top:12px;left:12px;right:72px;min-height:50px;background:var(--bg-1);border-radius:10px}
+.eng-map .map-task.location-share{top:12px;bottom:auto;height:auto;min-height:62px;max-height:140px;overflow:auto}.map-task>div{flex:1;min-width:0}.map-task span{white-space:normal;overflow-wrap:anywhere}
+.map-task.location-share button{flex:none;min-height:42px;padding:0 12px;border:1px solid var(--line-2);border-radius:8px}
+.tabbar{flex:none;margin:0;width:100%;max-width:none;border-radius:0}.tabbar button{min-height:48px}.tb-icon{border-radius:8px}
+.eng .geo-attribution{bottom:116px}.eng .geo-weather-toggle{bottom:60px}
+.auth-bg::after{background:none}.auth-points li{background:var(--bg-1);border-radius:10px}.auth-card{box-shadow:none}
+@media(min-width:981px){
+ .dispatch.has-panel .workspace{margin-right:min(420px,40vw)}
+ .dispatch.has-panel .cmdbar,body.tauri-app .dispatch.has-panel .cmdbar{right:14px}
+ .dispatch.has-panel .demobar,.dispatch.has-panel .legend{right:14px}
+ .dispatch.has-panel .map-controls,.dispatch.has-panel .map-scale,body.panel-open .map-controls,body.panel-open .map-scale{right:14px}
+ .dispatch.has-panel .detail{width:min(392px,calc(40vw - 28px))}
+}
+@container workspace (max-width:1000px){.cmd-stats:not(.kpi),.cmd-sep{display:none}.cmd-stats.kpi .stat:last-child{display:none}}
+@container workspace (max-width:700px){.cmd-stats.kpi{display:none}.cmd-controls{gap:4px}.cmd-title{min-width:100px}.cmdbar{padding:10px}.geo-toolbar{top:144px}.compare{font-size:11px;gap:6px}}
+@media(max-width:600px){
+ .eng-bar{padding-top:calc(12px + var(--safe-top));gap:8px}.conn-chip{max-width:100px;font-size:11px;padding:0 7px}
+ .eng-scroll{padding:12px}.task{padding:14px;gap:12px}.ring{width:88px;height:88px}.task-facts{grid-template-columns:1fr}.task-facts div{padding:8px 12px;flex-direction:row;justify-content:space-between;gap:12px}
+ .stepper li{font-size:9px}.task-actions{flex-wrap:wrap}.row-2{grid-template-columns:1fr}.eng-stats{gap:6px}.eng-stats div{padding:10px}.eng-stats b{font-size:18px}
+ .geo-toolbar{left:10px;right:10px;max-width:none;width:auto}.geo-layer-list{flex:1 0 100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.geo-layer-list button{justify-content:center;padding:0 5px;font-size:10px}
+ .geo-toolbar>small{display:none}.geo-tools{right:10px}.geo-tools button{width:40px;height:40px}.geo-weather-toggle{left:10px;width:210px;bottom:60px}
+ .geo-attribution{display:none}.geo-weather-panel,.eng-map .geo-weather-panel{top:68px;bottom:112px;left:10px;right:10px;width:auto;max-height:none}
+ .geo-gps-card{left:10px;right:60px;bottom:112px;width:auto;max-height:35dvh}.geo-aircraft-card{top:auto;bottom:112px;left:10px;right:60px;width:auto;max-height:40dvh}
+ .settings-scroll{padding:14px}.setting-row{gap:12px}.setting-row span{font-size:12px}.modal-head,.modal-body,.modal-foot{padding-left:14px;padding-right:14px}
+ .file,.voice{min-width:0}.bubble{max-width:85%}.composer{padding-bottom:calc(10px + var(--safe-bottom))}
+}
+
+/* Keep the simulation controls inside the command bar. */
+.cmd-controls{min-width:0;max-width:100%}.cmd-controls .sim{flex-shrink:1;min-width:0;height:auto;min-height:40px}.cmd-controls .sim-btn{flex-shrink:0;white-space:nowrap;padding-inline:10px}.cmd-controls .sim select{flex-shrink:0;width:62px}.cmd-title{min-width:0}.cmd-stats{min-width:0}@container workspace (max-width:600px){.cmd-controls .geo-mode-btn{display:none}.cmd-controls .sim-btn{font-size:12px;padding-inline:7px}.cmd-controls{gap:4px}}

@@ -4,7 +4,7 @@
 
 RampPulse uses the public regional endpoint from [adsb.lol](https://www.adsb.lol/docs/open-data/api) through the Rust server. Its published anonymous allowance is 500 requests per day per IP; a free adhoc key can raise that to 1,000/day after its request and review. Responses are published under ODbL 1.0, so the map credits adsb.lol and links the source. The service is best-effort and does not provide an availability guarantee.
 
-The server calls one airport-radius endpoint, caches the latest snapshot in memory, and enforces a minimum three-minute polling interval. The default SVO search radius is 50 nautical miles. The client never calls the aviation provider directly and never receives an API key. Provider registration/type/altitude fields are optional; missing fields stay missing. `seen_pos` drives per-aircraft freshness, and cache/provider errors surface as `STALE` or `OFFLINE` while the operation simulator keeps running.
+The server calls one airport-radius endpoint, caches the latest snapshot in memory, and enforces a minimum three-minute polling interval. The default VDNH search radius is 50 nautical miles. The client never calls the aviation provider directly and never receives an API key. Provider registration/type/altitude fields are optional; missing fields stay missing. `seen_pos` drives per-aircraft freshness, and cache/provider errors surface as `STALE` or `OFFLINE` while the operation simulator keeps running.
 
 OpenSky was reviewed but is not enabled: its current terms limit REST use to non-profit research/education and require written authorization for any operational API integration. ADS-B Exchange's current enterprise API is subscription-based; its community API is for personal/non-commercial use. AirLabs docs require an API key, and this implementation does not assume an undocumented free quota. This makes adsb.lol the selected live source for the current integration; it does not certify aviation data for operational safety.
 
@@ -16,15 +16,15 @@ AIRCRAFT_API_BASE=https://api.adsb.lol
 AIRCRAFT_API_KEY=
 AIRCRAFT_POLL_INTERVAL=180
 AIRCRAFT_MAX_RADIUS=50
-AIRCRAFT_CENTER_LAT=55.97278
-AIRCRAFT_CENTER_LON=37.41472
+AIRCRAFT_CENTER_LAT=55.8330053
+AIRCRAFT_CENTER_LON=37.628713
 ```
 
-`AIRCRAFT_API_KEY` is optional. The no-key limit is the reason for the 180-second minimum. `AIRCRAFT_MAX_RADIUS` is in nautical miles and is clamped to 250. The center defaults to Sheremetyevo and can be changed per server configuration. `AIRCRAFT_ENABLED=false` disables the feed without affecting simulation.
+`AIRCRAFT_API_KEY` is optional. The no-key limit is the reason for the 180-second minimum. `AIRCRAFT_MAX_RADIUS` is in nautical miles and is clamped to 250. The center defaults to VDNH and can be changed per server configuration. `AIRCRAFT_ENABLED=false` disables the feed without affecting simulation.
 
 ## Geographic map and airport transform
 
-The `GEO` view is separate from the existing operations schematic. Its Sheremetyevo background uses the same detailed local airport graph as the dark operations map, from `data/airport_sheremetyevo.json`. The separate IT2026 view uses the supplied VDNH-area GeoJSON and keeps those coordinates. Neither view requests OSM, 2GIS, or other map tiles; Leaflet is used only for local interaction and positioning. The airport converter stores a local-metres-to-WGS84 transform; shared taxiway nodes were compared with a map conversion when the transform was added, leaving a 15.4 m RMS difference. This is a map-data alignment estimate, not a GPS accuracy claim.
+VDNH is the main map in the operations view. Server routes, stands, engineer bases, and simulated aircraft use the graph generated from the supplied IT2026 GeoJSON in `data/airport_vdnh.json`. The geographic view renders the same coordinates in WGS84. Neither view requests OSM, 2GIS, or other map tiles; Leaflet is used only for local interaction and positioning.
 
 The REAL layer contains provider ADS-B positions. The SIMULATION layer maps the existing simulated aircraft from the airport-local coordinate system into WGS84. The flight trails are only positions observed during the current app session; no historical API track is fabricated or persisted. Replay is not enabled because no provider history is currently wired in.
 

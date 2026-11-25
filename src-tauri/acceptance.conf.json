@@ -1,0 +1,12 @@
+{
+  "identifier": "ru.oto.ramppulse.acceptance",
+  "version": "0.6.18",
+  "bundle": {
+    "resources": {
+      "../data/": "data/",
+      "resources/server/": "server/",
+      "../web/dist/": "frontend/"
+    }
+  },
+  "productName": "RampPulse Test"
+}
