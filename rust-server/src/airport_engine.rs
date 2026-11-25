@@ -119,7 +119,58 @@ struct TechRoute {
     next_point: usize,
     published_next_point: usize,
     speed: f64,
+    segment_speeds: Vec<f64>,
+    wait_seconds: f64,
     unreachable: bool,
+}
+
+impl TechRoute {
+    fn has_arrived(&self) -> bool {
+        !self.unreachable && self.wait_seconds <= 0.0 && self.next_point >= self.points.len()
+    }
+
+    fn limit_mps(&self) -> f64 {
+        if self.unreachable || self.next_point >= self.points.len() { return 0.0; }
+        self.segment_speeds.get(self.next_point.saturating_sub(1)).copied().unwrap_or(5.0 / 3.6)
+    }
+
+    fn remaining_seconds(&self, mut position: MapPoint) -> f64 {
+        let mut seconds = self.wait_seconds;
+        for i in self.next_point..self.points.len() {
+            let next = self.points[i];
+            let speed = self.segment_speeds.get(i.saturating_sub(1)).copied().unwrap_or(5.0 / 3.6);
+            seconds += distance(position.x, position.y, next.x, next.y) / speed.max(0.1);
+            position = next;
+        }
+        seconds
+    }
+
+    fn advance(&mut self, mut position: MapPoint, mut seconds: f64) -> MapPoint {
+        self.speed = 0.0;
+        if self.unreachable { return position; }
+        let waiting = self.wait_seconds.min(seconds);
+        self.wait_seconds -= waiting;
+        seconds -= waiting;
+        while self.next_point < self.points.len() && seconds > 0.0 {
+            let target = self.points[self.next_point];
+            let remaining = distance(position.x, position.y, target.x, target.y);
+            let speed = self.limit_mps().max(0.1);
+            let duration = remaining / speed;
+            if duration <= seconds {
+                position = target;
+                seconds -= duration;
+                self.next_point += 1;
+            } else {
+                let ratio = speed * seconds / remaining;
+                position.x += (target.x - position.x) * ratio;
+                position.y += (target.y - position.y) * ratio;
+                seconds = 0.0;
+            }
+            self.speed = speed;
+        }
+        if self.next_point >= self.points.len() { self.speed = 0.0; }
+        position
+    }
 }
 
 impl AirportEngine {
@@ -294,6 +345,7 @@ impl AirportEngine {
                 techs.len() - 1
             };
             let tech = &mut techs[index];
+            tech.speed = 0.0;
             tech.name = user.name.clone();
             tech.qual = user.qual.clone().unwrap_or_default();
             tech.types = user.types.clone();
@@ -405,8 +457,9 @@ impl AirportEngine {
                                         published_next_point: 1,
                                         via: request.via.clone(),
                                         mode: path.mode,
-                                        speed: (path.distance_m / path.eta_seconds.max(0.001))
-                                            .max(0.1),
+                                        speed: 0.0,
+                                        segment_speeds: std::iter::once(5.0 / 3.6).chain(path.segment_speeds_mps.iter().copied()).collect(),
+                                        wait_seconds: if path.mode == "vehicle" { 20.0 } else { 0.0 },
                                         unreachable: false,
                                     },
                                 );
@@ -424,7 +477,9 @@ impl AirportEngine {
                                         published_next_point: 1,
                                         via: request.via.clone(),
                                         mode: "walk",
-                                        speed: 5.0 / 3.6,
+                                        speed: 0.0,
+                                        segment_speeds: vec![],
+                                        wait_seconds: 0.0,
                                         unreachable: true,
                                     },
                                 );
@@ -456,7 +511,8 @@ impl AirportEngine {
                             )
                             .map(|(a, b)| distance(a.x, a.y, b.x, b.y))
                             .sum::<f64>();
-                            let eta = (!route.unreachable).then_some(route_distance / route.speed);
+                            let eta = (!route.unreachable).then_some(route.remaining_seconds(MapPoint { x: tech.x, y: tech.y }));
+                            tech.speed = if state.sim_running { route.speed } else { 0.0 };
                             value["eta_left"] = json!(eta);
                             value["eta"] = json!(eta);
                             value["route_available"] = json!(!route.unreachable);
@@ -551,7 +607,15 @@ impl AirportEngine {
         });
         let mut result = json!({
             "sim_time":state.sim_time,"sim_speed":state.sim_speed,"sim_running":state.sim_running,
-            "norm":900,"aircraft":state.aircraft,"techs":techs,"vehicles":[],"gse":[],"vehicle_speed":10.0,
+            "norm":900,"aircraft":state.aircraft,"techs":techs.iter().map(|tech| {
+                let mut v = json!(tech);
+                if let Some(route) = state.tech_routes.get(&tech.id) {
+                    v["speed_source"] = json!("simulation");
+                    v["speed_kmh"] = json!(if state.sim_running { route.speed * 3.6 } else { 0.0 });
+                    v["speed_limit_kmh"] = json!(route.limit_mps() * 3.6);
+                } else { v["speed_kmh"] = json!(0.0); v["speed_limit_kmh"] = Value::Null; }
+                v
+            }).collect::<Vec<_>>(),"vehicles":[],"gse":[],"vehicle_speed":10.0,
             "gse_types":gse_types(),"requests":filtered_map,"active":filtered_requests,"history":filtered_history,
             "blocked":state.blocked,"events":state.events,"stats":stats,"airport_name":self.airport_name,
             "llm":{"mode":"builtin","model":"встроенный"}
@@ -712,7 +776,9 @@ impl AirportEngine {
                                 published_next_point: 1,
                                 via: via.clone(),
                                 mode: path.mode,
-                                speed: (path.distance_m / path.eta_seconds.max(0.001)).max(0.1),
+                                speed: 0.0,
+                                segment_speeds: std::iter::once(5.0 / 3.6).chain(path.segment_speeds_mps.iter().copied()).collect(),
+                                wait_seconds: if path.mode == "vehicle" { 20.0 } else { 0.0 },
                                 unreachable: false,
                             }
                         })
@@ -726,6 +792,8 @@ impl AirportEngine {
                     via,
                     mode: "walk",
                     speed,
+                    segment_speeds: vec![],
+                    wait_seconds: 0.0,
                     unreachable: true,
                 });
             state.tech_routes.insert(tech_id, replacement);
@@ -836,39 +904,15 @@ impl AirportEngine {
                 let Some(route) = tech_routes.get_mut(&tech_id) else {
                     continue;
                 };
-                let mut current = position;
-                let mut budget = route.speed * elapsed;
-                while route.next_point < route.points.len() && budget > 0.0 {
-                    let target = route.points[route.next_point];
-                    let remaining = distance(current.x, current.y, target.x, target.y);
-                    if remaining <= 0.001 {
-                        current = target;
-                        route.next_point += 1;
-                    } else if budget >= remaining {
-                        current = target;
-                        budget -= remaining;
-                        route.next_point += 1;
-                    } else {
-                        let ratio = budget / remaining;
-                        current.x += (target.x - current.x) * ratio;
-                        current.y += (target.y - current.y) * ratio;
-                        budget = 0.0;
-                    }
-                }
+                let current = route.advance(position, elapsed);
                 tech_positions.insert(tech_id, current);
-                let remaining_distance = std::iter::once(current)
-                    .chain(route.points.iter().skip(route.next_point).copied())
-                    .zip(
-                        std::iter::once(current)
-                            .chain(route.points.iter().skip(route.next_point).copied())
-                            .skip(1),
-                    )
-                    .map(|(a, b)| distance(a.x, a.y, b.x, b.y))
-                    .sum::<f64>();
                 let mut delta = json!({
                     "id": tech_id, "request_id": route.request_id,
                     "x": current.x, "y": current.y,
-                    "eta_left": if route.unreachable { Value::Null } else { json!(remaining_distance / route.speed) },
+                    "arrived": route.has_arrived(),
+                    "eta_left": if route.unreachable { Value::Null } else { json!(route.remaining_seconds(current)) },
+                    "speed": route.speed, "speed_kmh": route.speed * 3.6,
+                    "speed_limit_kmh": route.limit_mps() * 3.6,
                     "route_available": !route.unreachable
                 });
                 if route.next_point != route.published_next_point {
@@ -907,6 +951,14 @@ impl AirportEngine {
         Ok(Some(
             json!({"sim_time":state.sim_time,"sim_speed":state.sim_speed,"sim_running":state.sim_running,"aircraft":aircraft,"techs":tech_deltas}),
         ))
+    }
+
+    pub fn stop_request_route(&self, tech_id: i64, request_id: i64) {
+        if let Ok(mut state) = self.state.write() {
+            if state.tech_routes.get(&tech_id).is_some_and(|r| r.request_id == request_id) {
+                state.tech_routes.remove(&tech_id);
+            }
+        }
     }
 
     pub fn move_tech(&self, tech_id: i64, x: f64, y: f64) -> Result<Value, String> {
@@ -1061,13 +1113,14 @@ fn add_legacy_request_fields(
     let arrived_sim = arrived_at.map(|at| sim_time - (now - at).max(0) as f64 * scale);
     let done_sim = resolved_at.map(|at| sim_time - (now - at).max(0) as f64 * scale);
     let frozen_elapsed = arrived_at
-        .map(|at| (at - created_at).max(0) as f64 * scale)
+        .map(|at| request.response_sec.unwrap_or((at - created_at).max(0) as f64))
         .unwrap_or(created_elapsed);
 
     value["created_sim"] = json!(created_sim);
     value["arrived_sim"] = arrived_sim.map_or(Value::Null, |time| json!(time));
     value["done_sim"] = done_sim.map_or(Value::Null, |time| json!(time));
     value["elapsed"] = json!(frozen_elapsed);
+    value["response_sec"] = arrived_at.map_or(Value::Null, |_| json!(frozen_elapsed));
     value["eta"] = Value::Null;
     value["eta_left"] = Value::Null;
     value["violation"] = json!(false);
@@ -1149,6 +1202,25 @@ mod vdnh_tests {
     use super::*;
 
     #[test]
+    fn arrived_duration_stays_frozen_when_simulation_speed_or_pause_changes() {
+        let mut request=RequestRecord {
+            response_sec:Some(1140.0),via:vec![],id:1,stand:"VDN-01".into(),description:String::new(),
+            qual:"Планер".into(),extra:String::new(),priority:"normal".into(),tech_id:Some(1),tech_name:String::new(),
+            status:"working".into(),status_ru:"В работе".into(),created_at:"2026-11-25T00:00:00.000Z".into(),
+            arrived_at:Some("2026-11-25T00:19:00.000Z".into()),started_at:Some("2026-11-25T00:19:00.000Z".into()),resolved_at:None,version:1,
+        };
+        for stored in [Some(1140.0),None] {
+            request.response_sec=stored;
+            for (speed,running) in [(1.0,true),(50.0,true),(5.0,false)] {
+                let mut value=json!({});
+                add_legacy_request_fields(&mut value,&request,5000.0,speed,running);
+                assert_eq!(value["elapsed"],json!(1140.0));
+                assert_eq!(value["response_sec"],json!(1140.0));
+            }
+        }
+    }
+
+    #[test]
     fn terminal_simulation_places_idle_technicians_and_starts_paused() {
         let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
         engine.state.write().unwrap().tech_positions.insert(42, MapPoint { x: 0.0, y: 0.0 });
@@ -1160,6 +1232,33 @@ mod vdnh_tests {
         let p = state.tech_positions.get(&42).unwrap();
         assert!(distance(p.x, p.y, engine.terminal.x, engine.terminal.y) < 0.01);
         assert!(engine.nodes.values().any(|n| distance(n.x,n.y,p.x,p.y) < 0.01));
+    }
+
+    #[test]
+    fn speed_limits_control_movement_and_eta() {
+        let mut route = TechRoute {
+            via: vec![], mode: "vehicle", request_id: 1, goal_node: "end".into(),
+            points: vec![MapPoint{x:0.0,y:0.0},MapPoint{x:100.0,y:0.0},MapPoint{x:200.0,y:0.0}],
+            next_point: 1, published_next_point: 1, speed: 0.0,
+            segment_speeds: vec![20.0/3.6,5.0/3.6], wait_seconds:20.0, unreachable:false,
+        };
+        let origin=MapPoint{x:0.0,y:0.0};
+        assert!((route.remaining_seconds(origin)-110.0).abs()<0.001);
+        let waiting=route.advance(origin,20.0);
+        assert_eq!(waiting.x,0.0);
+        assert_eq!(route.speed,0.0);
+        let corner=route.advance(waiting,18.0);
+        assert!((corner.x-100.0).abs()<0.001);
+        assert!((route.limit_mps()*3.6-5.0).abs()<0.001);
+        let moving=route.advance(corner,36.0);
+        assert!((moving.x-150.0).abs()<0.001);
+        assert!((route.speed*3.6-5.0).abs()<0.001);
+        assert!((route.remaining_seconds(moving)-36.0).abs()<0.001);
+        assert!(!route.has_arrived());
+        let arrived=route.advance(moving,36.0);
+        assert!(route.has_arrived());
+        assert!((arrived.x-200.0).abs()<0.001);
+        assert_eq!(route.speed,0.0);
     }
 
     fn vdnh() -> Value {
@@ -1182,22 +1281,26 @@ mod vdnh_tests {
     #[test]
     fn spawned_vdnh_aircraft_moves_from_arrival_route_to_its_stand() {
         let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
+        engine.state.write().unwrap().aircraft.pop();
         let spawned = engine.spawn_aircraft().unwrap();
         let id = spawned["id"].as_i64().unwrap();
         let before = engine.snapshot(&[], &[], None)["aircraft"].as_array().unwrap().iter().find(|aircraft| aircraft["id"] == id).unwrap().clone();
         assert_eq!(before["status"], "inbound");
+        assert!(engine.tick(0.25).unwrap().is_none());
+        engine.set_sim(Some(1),Some(true),false).unwrap();
         engine.tick(0.25).unwrap();
         let after = engine.snapshot(&[], &[], None)["aircraft"].as_array().unwrap().iter().find(|aircraft| aircraft["id"] == id).unwrap().clone();
         assert_ne!((before["x"].as_f64(), before["y"].as_f64()), (after["x"].as_f64(), after["y"].as_f64()));
     }
 
     #[test]
-    fn vdnh_demo_starts_with_two_moving_aircraft() {
+    fn vdnh_demo_starts_paused_with_registered_aircraft() {
         let engine = AirportEngine::new(&vdnh(), "[]").unwrap();
         let snapshot = engine.snapshot(&[], &[], None);
         let aircraft = snapshot["aircraft"].as_array().unwrap();
-        assert_eq!(aircraft.len(), 4);
-        assert_eq!(aircraft.iter().filter(|plane| plane["status"] == "inbound").count(), 2);
+        assert_eq!(aircraft.len(), vdnh()["stands"].as_array().unwrap().len());
+        assert!(aircraft.iter().all(|plane| plane["status"] == "parked"));
+        assert_eq!(snapshot["sim_running"],json!(false));
     }
 }
 

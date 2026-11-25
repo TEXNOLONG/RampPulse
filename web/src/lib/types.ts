@@ -66,6 +66,9 @@ export interface Request {
 }
 
 export interface Technician {
+  speed_kmh?: number | null;
+  speed_source?: 'gps' | 'simulation';
+  speed_limit_kmh?: number | null;
   id: number;
   name: string;
   qual: string;
@@ -167,7 +170,7 @@ export interface ShiftState {
 }
 
 export interface AirportNode { id: string; x: number; y: number }
-export interface AirportEdge { id: string; a: string; b: string; length: number; kind?: string; name?: string }
+export interface AirportEdge { walk_allowed?: boolean; vehicle_allowed?: boolean; blocked?: boolean; id: string; a: string; b: string; length: number; kind?: string; name?: string }
 export interface Airport {
   name: string;
   source?: string;

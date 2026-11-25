@@ -342,6 +342,7 @@ impl AccountStore {
             }
         }
         for (column, sql) in [
+            ("response_sec", "ALTER TABLE requests ADD COLUMN response_sec REAL"),
             (
                 "via_json",
                 "ALTER TABLE requests ADD COLUMN via_json TEXT NOT NULL DEFAULT '[]'",
@@ -899,7 +900,7 @@ impl AccountStore {
         if user.role == "engineer" {
             let mut statement=connection.prepare(
                 "SELECT r.id,r.stand,r.description,r.qual,r.extra,r.priority,r.tech_id,r.tech_name,r.status,
-                 r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json
+                 r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json,r.response_sec
                  FROM requests r WHERE r.tech_id=?1 ORDER BY r.id DESC"
             )?;
             let rows = statement.query_map([user.tech_id.unwrap_or(user.id)], read_request)?;
@@ -907,7 +908,7 @@ impl AccountStore {
         }
         let mut statement=connection.prepare(
             "SELECT r.id,r.stand,r.description,r.qual,r.extra,r.priority,r.tech_id,r.tech_name,r.status,
-             r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json FROM requests r ORDER BY r.id DESC"
+             r.created_at,r.arrived_at,r.started_at,r.resolved_at,r.version,r.via_json,r.response_sec FROM requests r ORDER BY r.id DESC"
         )?;
         let rows = statement.query_map([], read_request)?;
         rows.collect()
@@ -916,7 +917,7 @@ impl AccountStore {
     pub fn open_requests_for_reassignment(&self) -> rusqlite::Result<Vec<RequestRecord>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json
+            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json,response_sec
              FROM requests WHERE status IN ('assigned','enroute') ORDER BY id",
         )?;
         let rows = statement.query_map([], read_request)?;
@@ -1456,6 +1457,53 @@ impl AccountStore {
         self.request_by_id(id)
     }
 
+    pub fn automatic_arrival_and_start(&self, id: i64, tech_id: i64, source: &str, time_scale: f64) -> rusqlite::Result<Option<RequestRecord>> {
+        if !time_scale.is_finite() || time_scale <= 0.0 || time_scale > 50.0 || !matches!(source,"gps"|"simulation") { return Err(rusqlite::Error::InvalidQuery); }
+        let mut connection=self.connection()?;
+        let tx=connection.transaction()?;
+        let current=query_request(&tx,id)?;
+        if current.tech_id!=Some(tech_id) || !matches!(current.status.as_str(),"assigned"|"enroute"|"arrived") {
+            return Ok(None);
+        }
+        let now=now_rfc3339();
+        let parse = |s: &str| time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok();
+        let response_sec = current.response_sec.unwrap_or_else(|| {
+            parse(current.arrived_at.as_deref().unwrap_or(&now)).zip(parse(&current.created_at))
+                .map(|(arrived,created)| (arrived-created).as_seconds_f64().max(0.0) * time_scale).unwrap_or(0.0)
+        });
+        let details=serde_json::json!({"source":source,"tech_id":tech_id,"automatic":true,"response_sec":response_sec}).to_string();
+        if current.status!="arrived" {
+            tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,from_status,to_status,details,created_at) VALUES(?1,0,'system','status_changed',?2,'arrived',?3,?4)",params![id,current.status,details,now])?;
+        }
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,from_status,to_status,details,created_at) VALUES(?1,0,'system','status_changed','arrived','working',?2,?3)",params![id,details,now])?;
+        tx.execute("UPDATE requests SET status='working',arrived_at=COALESCE(arrived_at,?1),started_at=?1,response_sec=?3,version=version+1 WHERE id=?2",params![now,id,response_sec])?;
+        tx.commit()?;
+        drop(connection);
+        Ok(Some(self.request_by_id(id)?))
+    }
+
+    pub fn decline_request(&self, id: i64, reason: &str, user: &PublicUser) -> rusqlite::Result<RequestRecord> {
+        let reason = reason.trim();
+        if user.role != "engineer" || user.tech_id.is_none() || !(3..=1000).contains(&reason.chars().count()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut connection = self.connection()?;
+        let tx = connection.transaction()?;
+        let current = query_request(&tx, id)?;
+        if current.tech_id != user.tech_id || !matches!(current.status.as_str(), "assigned" | "enroute" | "arrived") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let now = now_rfc3339();
+        tx.execute("UPDATE requests SET tech_id=NULL,tech_name='',status='waiting',arrived_at=NULL,started_at=NULL,resolved_at=NULL,response_sec=NULL,version=version+1 WHERE id=?1", [id])?;
+        let details = serde_json::json!({"reason":reason,"tech_id":user.tech_id,"engineer":user.name}).to_string();
+        tx.execute("INSERT INTO request_history(request_id,actor_id,actor_role,event,from_status,to_status,details,created_at) VALUES(?1,?2,'engineer','declined',?3,'waiting',?4,?5)", params![id,user.id,current.status,details,now])?;
+        let content = format!("Отказ от заявки №{} · {}. Инженер: {}. Причина: {}. Требуется новое назначение диспетчером.",id,current.stand,user.name,reason);
+        tx.execute("INSERT INTO chat_messages(room_id,sender_id,message_kind,content,created_at) SELECT id,?1,'text',?2,?3 FROM chat_rooms WHERE kind='shift' ORDER BY id LIMIT 1",params![user.id,content,now])?;
+        tx.commit()?;
+        drop(connection);
+        self.request_by_id(id)
+    }
+
     pub fn assign_request(
         &self,
         id: i64,
@@ -1495,7 +1543,7 @@ impl AccountStore {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let now = now_rfc3339();
-        tx.execute("UPDATE requests SET tech_id=?1,tech_name=?2,status='enroute',arrived_at=NULL,started_at=NULL,resolved_at=NULL,version=version+1 WHERE id=?3", params![tech_id,name,id])?;
+        tx.execute("UPDATE requests SET tech_id=?1,tech_name=?2,status='enroute',arrived_at=NULL,started_at=NULL,resolved_at=NULL,response_sec=NULL,version=version+1 WHERE id=?3", params![tech_id,name,id])?;
         let event = if actor.role == "system" {
             "auto_reassigned"
         } else if current.tech_id.is_some() {
@@ -1668,7 +1716,7 @@ impl AccountStore {
     fn request_by_id(&self, id: i64) -> rusqlite::Result<RequestRecord> {
         let connection = self.connection()?;
         connection.query_row(
-            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json FROM requests WHERE id=?1",
+            "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json,response_sec FROM requests WHERE id=?1",
             [id], read_request,
         )
     }
@@ -1707,6 +1755,7 @@ fn migrate_attachment_limit(connection: &rusqlite::Connection) -> rusqlite::Resu
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestRecord {
+    pub response_sec: Option<f64>,
     pub via: Vec<String>,
     pub id: i64,
     pub stand: String,
@@ -1841,6 +1890,7 @@ fn room_recipients(
 fn read_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRecord> {
     let status: String = row.get(8)?;
     Ok(RequestRecord {
+        response_sec: row.get(15)?,
         via: serde_json::from_str(&row.get::<_, String>(14)?)
             .map_err(|_| rusqlite::Error::InvalidQuery)?,
         id: row.get(0)?,
@@ -1979,6 +2029,83 @@ mod tests {
     }
 
     #[test]
+    fn engineer_and_dispatcher_request_queries_include_arrival_duration() {
+        let store=AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        let created=request(&store,vec![]);
+        store.assign_request(created.id,1,&dispatcher(),false).unwrap();
+        let engineer=store.active_engineers().unwrap().into_iter().find(|u|u.tech_id==Some(1)).unwrap();
+        for user in [&engineer,&dispatcher()] {
+            let rows=store.requests_for(user).unwrap();
+            assert_eq!(rows.len(),1);
+            assert_eq!(rows[0].id,created.id);
+            assert!(rows[0].response_sec.is_none());
+        }
+        store.automatic_arrival_and_start(created.id,1,"gps",1.0).unwrap().unwrap();
+        for user in [&engineer,&dispatcher()] {
+            let rows=store.requests_for(user).unwrap();
+            assert_eq!(rows[0].status,"working");
+            assert!(rows[0].response_sec.is_some());
+        }
+    }
+
+    #[test]
+    fn automatic_arrival_starts_once_and_preserves_assignment_safeguards() {
+        let store=AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        for source in ["gps","simulation"] {
+            let created=request(&store,vec![]);
+            store.assign_request(created.id,1,&dispatcher(),false).unwrap();
+            assert!(store.automatic_arrival_and_start(created.id,999,source,1.0).unwrap().is_none());
+            let working=store.automatic_arrival_and_start(created.id,1,source,1.0).unwrap().unwrap();
+            assert_eq!(working.status,"working");
+            assert_eq!(working.created_at,created.created_at);
+            assert!(working.arrived_at.is_some());
+            assert!(working.started_at.is_some());
+            assert!(working.response_sec.is_some());
+            assert!(store.automatic_arrival_and_start(created.id,1,source,1.0).unwrap().is_none());
+            let events=store.journal().unwrap().into_iter().filter(|r|r[1]==created.id.to_string() && r[4]=="status_changed").collect::<Vec<_>>();
+            assert_eq!(events.len(),2);
+            assert!(events.iter().any(|r|r[6]=="arrived" && r[7].contains(source)));
+            assert!(events.iter().any(|r|r[5]=="arrived" && r[6]=="working"));
+            let engineer=store.active_engineers().unwrap().into_iter().find(|u|u.tech_id==Some(1)).unwrap();
+            assert!(store.decline_request(created.id,"Отмена работы",&engineer).is_err());
+            assert!(store.assign_request(created.id,1,&dispatcher(),false).is_err());
+            store.transition_request(created.id,"done",&engineer).unwrap();
+            assert!(store.automatic_arrival_and_start(created.id,1,source,1.0).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn engineer_decline_requires_reason_ownership_and_unstarted_work() {
+        let store=AccountStore::open(":memory:").unwrap();
+        store.seed_demo().unwrap();
+        let created=request(&store,vec!["stop".into()]);
+        store.assign_request(created.id,1,&dispatcher(),false).unwrap();
+        let users=store.active_engineers().unwrap();
+        let engineer=users.iter().find(|u|u.tech_id==Some(1)).unwrap();
+        let mut other=engineer.clone();
+        other.tech_id=Some(999);
+        assert!(store.decline_request(created.id,"Нет допуска",&other).is_err());
+        assert!(store.decline_request(created.id,"",engineer).is_err());
+        assert!(store.decline_request(created.id,&"а".repeat(1001),engineer).is_err());
+        assert!(store.decline_request(created.id,"Нет допуска",&dispatcher()).is_err());
+        let waiting=store.decline_request(created.id,"Нет необходимого инструмента",engineer).unwrap();
+        assert_eq!(waiting.status,"waiting");
+        assert!(waiting.tech_id.is_none());
+        assert_eq!(waiting.created_at,created.created_at);
+        assert_eq!(waiting.via,created.via);
+        assert!(store.decline_request(created.id,"Повторный отказ",engineer).is_err());
+        let journal=store.journal().unwrap();
+        assert_eq!(journal.iter().filter(|r|r[4]=="declined").count(),1);
+        assert!(journal.iter().any(|r|r[4]=="declined" && r[7].contains("Нет необходимого инструмента")));
+        store.assign_request(created.id,1,&dispatcher(),false).unwrap();
+        store.transition_request(created.id,"arrived",engineer).unwrap();
+        store.transition_request(created.id,"working",engineer).unwrap();
+        assert!(store.decline_request(created.id,"Хочу отказаться",engineer).is_err());
+    }
+
+    #[test]
     fn request_progression_blocks_dispatcher_cancellation_after_work_starts() {
         let store = AccountStore::open(":memory:").unwrap();
         store.seed_demo().unwrap();
@@ -1992,9 +2119,7 @@ mod tests {
             .into_iter()
             .find(|user| user.tech_id == Some(1))
             .unwrap();
-        store
-            .transition_request(created.id, "enroute", &engineer)
-            .unwrap();
+        assert_eq!(store.requests_for(&engineer).unwrap()[0].status,"enroute");
         store
             .transition_request(created.id, "arrived", &engineer)
             .unwrap();
@@ -2016,9 +2141,7 @@ mod tests {
         store
             .assign_request(second.id, 1, &dispatcher(), false)
             .unwrap();
-        store
-            .transition_request(second.id, "enroute", &engineer)
-            .unwrap();
+        assert_eq!(store.requests_for(&engineer).unwrap().iter().find(|r|r.id==second.id).unwrap().status,"enroute");
         store
             .transition_request(second.id, "arrived", &engineer)
             .unwrap();
@@ -2043,7 +2166,7 @@ mod tests {
 
 fn query_request(connection: &rusqlite::Connection, id: i64) -> rusqlite::Result<RequestRecord> {
     connection.query_row(
-        "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json FROM requests WHERE id=?1",
+        "SELECT id,stand,description,qual,extra,priority,tech_id,tech_name,status,created_at,arrived_at,started_at,resolved_at,version,via_json,response_sec FROM requests WHERE id=?1",
         [id], read_request,
     )
 }

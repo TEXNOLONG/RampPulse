@@ -1,7 +1,7 @@
 {
   "name": "ramppulse-desktop",
   "private": true,
-  "version": "0.6.21",
+  "version": "0.6.22",
   "scripts": {
     "tauri": "tauri",
     "desktop:dev": "node desktop/build_server.js && tauri dev",

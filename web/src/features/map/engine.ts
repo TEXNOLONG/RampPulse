@@ -8,6 +8,7 @@ const PLANE = 'M0,-17 C1.4,-17 2.1,-14 2.1,-11 L2.1,-4 L15,3 L15,5.5 L2.1,2 L1.6
 export interface Selection { request: number | null; tech: number | null; aircraft: number | null; stand: string | null }
 export interface Comparison { requestId: number; human: Point[]; system: Point[]; humanName: string; humanEta: number; systemEta: number }
 export interface MapCallbacks {
+  onPoint?(x: number, y: number): void;
   onStand?(id: string): void;
   onTech?(id: number): void;
   onAircraft?(id: number): void;
@@ -15,7 +16,7 @@ export interface MapCallbacks {
   onEmpty?(): void;
   onView?(scaleMetersPerPx: number): void;
 }
-export interface MapOptions { interactiveEdges: boolean; edgeMode?: boolean; showLabels: boolean; showRoutes: boolean; reduceMotion: boolean; focusTech?: number | null }
+export interface MapOptions { pointSelection?: boolean; interactiveEdges: boolean; edgeMode?: boolean; showLabels: boolean; showRoutes: boolean; reduceMotion: boolean; focusTech?: number | null }
 
 interface Motion { node: SVGGElement; x: number; y: number; a: number; tx: number; ty: number; ta: number; vx: number; vy: number; va: number }
 interface Segment { id: string; name?: string; ax: number; ay: number; bx: number; by: number }
@@ -66,6 +67,19 @@ export class MapEngine {
     this.svg.replaceChildren();
   }
 
+  setWaypoints(ids: string[]) {
+    const layer = this.layers.waypoints;
+    layer.replaceChildren();
+    ids.forEach((id, index) => {
+      const point = this.nodes.get(id);
+      if (!point) return;
+      const marker = el('g', {transform:`translate(${point.x} ${point.y})`,class:'route-waypoint','pointer-events':'none'},layer);
+      const symbol = el('g', {style:'transform:scale(var(--mk,1))'}, marker);
+      el('circle',{r:13,fill:'var(--text)',stroke:'var(--bg)','stroke-width':2},symbol);
+      el('text',{'text-anchor':'middle','dominant-baseline':'central',fill:'var(--bg)','font-size':14,'font-weight':700},symbol).textContent=String(index+1);
+    });
+  }
+
   setOptions(opts: Partial<MapOptions>) {
     this.opts = { ...this.opts, ...opts };
     this.svg.classList.toggle('no-labels', !this.opts.showLabels);
@@ -81,7 +95,7 @@ export class MapEngine {
     this.layers = {
       areas: L('areas'), parking: L('parking'), runways: L('runways'), taxi: L('taxi'), blocked: L('blocked'),
       iso: L('iso'), alt: L('alt'), routes: L('routes'), compare: L('compare'), bases: L('bases'), stands: L('stands'),
-      aircraft: L('aircraft'), techs: L('techs'), labels: L('labels'), tags: L('tags'),
+      aircraft: L('aircraft'), techs: L('techs'), labels: L('labels'), tags: L('tags'), waypoints: L('waypoints'),
     };
     const { areas, parking, runways, taxi, bases, stands, labels } = this.layers;
     for (const a of this.air.areas || []) {
@@ -456,6 +470,11 @@ export class MapEngine {
   }
 
   private click(e: PointerEvent) {
+    if (this.opts.pointSelection && this.cb.onPoint) {
+      const point = this.toMap(e.clientX, e.clientY);
+      this.cb.onPoint(point.x, point.y);
+      return;
+    }
     const target = document.elementFromPoint(e.clientX, e.clientY);
     const tech = target?.closest('[data-tech]');
     if (tech) return this.cb.onTech?.(Number(tech.getAttribute('data-tech')));

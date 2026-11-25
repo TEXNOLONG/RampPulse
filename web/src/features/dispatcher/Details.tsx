@@ -1,6 +1,6 @@
 import { apiUrl, get } from '../../lib/api';
 import { useState } from 'react';
-import { X, Phone, MessageSquare, MapPin, Check, Play, Flag, Ban, Timer, Footprints, Car, PlaneTakeoff, Plus, Move, Save, Wrench } from 'lucide-react';
+import { X, Phone, MessageSquare, MapPin, Check, Flag, Ban, Timer, Footprints, Car, PlaneTakeoff, Plus, Move, Save, Wrench } from 'lucide-react';
 import type { Aircraft, Request, Technician } from '../../lib/types';
 import { useOps, act } from '../../store/ops';
 import { useChat } from '../../store/chat';
@@ -27,6 +27,7 @@ const run = (p: Promise<unknown>, ok?: string) => p.then(() => ok && toast.ok(ok
 export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): void; onTech(id: number): void }) {
   const contact = useTechContact(r.tech_id);
   const engineers = useOps(s => s.state?.techs || []);
+  const assignedTech = engineers.find(t => t.id === r.tech_id);
   const [target, setTarget] = useState('');
   const assign = async () => {
     if (!target || busy) return;
@@ -43,9 +44,9 @@ export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): v
     if (confirmShiftLead && !window.confirm('Подтвердите снятие заявки в работе старшим смены. Решение будет записано в журнал.')) return;
     setBusy(s); run(act.dispatcherStep(r.id, s, confirmShiftLead), ok).finally(() => setBusy(null));
   };
-  const next = { enroute: ['arrive', 'Инженер прибыл', Check], arrived: ['start', 'Начать работу', Play], working: ['resolve', 'Работа выполнена', Flag] }[r.status as string] as [any, string, any] | undefined;
+  const next = { working: ['resolve', 'Работа выполнена', Flag] }[r.status as string] as [any, string, any] | undefined;
   const NextIcon = next?.[2];
-  const elapsed = r.arrived_sim != null ? r.arrived_sim - r.created_sim : r.elapsed;
+  const elapsed = r.response_sec ?? r.elapsed;
   const pct = Math.min(1, elapsed / NORM);
   const arrived = ['arrived', 'working', 'done'].includes(r.status);
   const steps = [
@@ -134,6 +135,7 @@ export function RequestDetail({ r, onClose, onTech }: { r: Request; onClose(): v
           const link = document.createElement('a'); link.href=url; link.download='ramppulse-journal.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
         } catch(e) { toast.bad(errorText(e)); }
       }}>Скачать журнал смены (CSV)</Button>
+      {assignedTech && <section className="panel-sec"><h3>Движение инженера</h3><div className="facts"><div><span>Скорость {assignedTech.speed_source === 'gps' ? 'GPS' : 'симуляции'}</span><b>{assignedTech.speed_kmh == null ? '—' : assignedTech.speed_kmh.toFixed(1) + ' км/ч'}</b></div><div><span>Лимит участка</span><b>{assignedTech.speed_limit_kmh == null ? '—' : assignedTech.speed_limit_kmh.toFixed(0) + ' км/ч'}</b></div></div></section>}
       <footer className="panel-actions">
         {next && <Button variant="primary" size="lg" icon={NextIcon ? <NextIcon size={18} /> : undefined} loading={busy === next[0]} onClick={() => step(next[0], 'Статус обновлён')}>{next[1]}</Button>}
         {!['done','cancelled'].includes(r.status) && <Button variant="danger" size="lg" icon={<Ban size={17} />} loading={busy === 'cancel'} onClick={() => step('cancel', 'Заявка отменена')}>Отменить</Button>}
@@ -163,7 +165,8 @@ export function TechDetail({ t, onClose, onMove }: { t: Technician; onClose(): v
       <section className="panel-sec">
         <div className="facts">
           <div><span>Квалификация</span><b style={{ color: qualColor(t.qual) }}>{t.qual}</b></div>
-          <div><span>Скорость</span><b>{t.speed} м/с</b></div>
+          <div><span>Скорость движения</span><b>{(t.speed_kmh ?? 0).toFixed(1)} км/ч</b></div>
+          <div><span>Лимит участка</span><b>{t.speed_limit_kmh == null ? "—" : `${t.speed_limit_kmh.toFixed(0)} км/ч`}</b></div>
           <div><span>База</span><b>{t.base}</b></div>
           <div><span>Допуски</span><b>{(t.types || []).join(', ') || '—'}</b></div>
         </div>

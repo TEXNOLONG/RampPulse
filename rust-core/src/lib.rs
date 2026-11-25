@@ -161,6 +161,7 @@ pub struct Route {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Journey {
+    pub segment_speeds_mps: Vec<f64>,
     pub nodes: Vec<String>,
     pub distance_m: f64,
     pub eta_seconds: f64,
@@ -375,7 +376,16 @@ impl AirportGraph {
                 let b = self.node(&pair[1]).unwrap().position;
                 (a.x-b.x).hypot(a.y-b.y)
             }).sum();
-            let trip = Journey { nodes, distance_m, eta_seconds: ms as f64 / 1000.0, mode: if vehicle { "vehicle" } else { "walk" } };
+            let segment_speeds_mps = nodes.windows(2).map(|pair| {
+                let from = self.index_by_id[&pair[0]];
+                let to = self.index_by_id[&pair[1]];
+                self.outgoing[from].iter().filter(|edge| edge.to == to && !edge.blocked && !blocked.contains(&edge.id))
+                    .filter_map(|edge| {
+                        let (walk, drive, speed) = self.road_speeds.get(&edge.id).copied().unwrap_or((true,true,20));
+                        if (vehicle && !drive) || (!vehicle && !walk) { None } else { Some(if vehicle { speed as f64 / 3.6 } else { 5.0 / 3.6 }) }
+                    }).max_by(f64::total_cmp).unwrap_or(5.0 / 3.6)
+            }).collect();
+            let trip = Journey { segment_speeds_mps, nodes, distance_m, eta_seconds: ms as f64 / 1000.0, mode: if vehicle { "vehicle" } else { "walk" } };
             if best.as_ref().is_none_or(|old: &Journey| trip.eta_seconds < old.eta_seconds) { best = Some(trip); }
         }
         best
@@ -450,5 +460,23 @@ impl AirportGraph {
             .map(|index| self.nodes[index].id.clone())
             .collect();
         Some(Route { nodes, cost: total })
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::*;
+    #[test]
+    fn journey_eta_uses_each_road_limit() {
+        let graph=AirportGraph::from_airport_json(r#"{
+          "nodes":[{"id":"a","x":0,"y":0},{"id":"b","x":100,"y":0},{"id":"c","x":200,"y":0}],
+          "edges":[{"id":"fast","a":"a","b":"b","vehicle_kmh":20},{"id":"slow","a":"b","b":"c","vehicle_kmh":5}]
+        }"#).unwrap();
+        let trip=graph.journey("a",&[],"c",&HashSet::new(),true).unwrap();
+        assert_eq!(trip.mode,"vehicle");
+        assert!((trip.eta_seconds-110.0).abs()<0.002);
+        assert_eq!(trip.segment_speeds_mps,vec![20.0/3.6,5.0/3.6]);
+        let walk=graph.journey("a",&[],"c",&HashSet::new(),false).unwrap();
+        assert!((walk.eta_seconds-144.0).abs()<0.002);
     }
 }

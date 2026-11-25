@@ -1,7 +1,7 @@
 import { routeInstruction } from '../../lib/navigation';
 import { apiUrl } from '../../lib/api';
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { ClipboardList, Map as MapIcon, MessageCircle, UserRound, Phone, MessageSquare, LifeBuoy, Clock, Check, Play, Flag, MapPin, Plane, Navigation, Power, Wifi, WifiOff, Coffee, Footprints, Car, ListChecks, FileText, ChevronRight, Timer } from 'lucide-react';
+import { ClipboardList, Map as MapIcon, MessageCircle, UserRound, Phone, MessageSquare, LifeBuoy, Clock, Check, Flag, MapPin, Plane, Navigation, Power, Wifi, WifiOff, Coffee, Footprints, Car, ListChecks, FileText, ChevronRight, Timer } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { useChat, useUnreadTotal } from '../../store/chat';
 import { useCall } from '../../store/call';
@@ -57,7 +57,8 @@ export function EngineerApp() {
   const lastNotifiedTask = useRef<number | null>(null);
   const [newTaskId, setNewTaskId] = useState<number | null>(null);
   useEffect(() => {
-    if (!task || lastNotifiedTask.current === task.id) return;
+    if (!task) { lastNotifiedTask.current = null; return; }
+    if (lastNotifiedTask.current === task.id) return;
     lastNotifiedTask.current = task.id;
     if (task.status === 'assigned' || task.status === 'enroute') {
       setNewTaskId(task.id);
@@ -110,7 +111,7 @@ export function EngineerApp() {
           <div className="eng-map">
             <Suspense fallback={<div className="geo-map-loading glass">Загрузка карты…</div>}><GeoMap airport={airport} simulated={state.aircraft} simulatedTechs={state.techs} requests={state.active} importedAirport panelOpen={false} manageGps={false} /></Suspense>
             <button className={cx('location-share-icon', sharingLocation && 'on', locationShareError && 'error')} aria-pressed={sharingLocation} aria-label={sharingLocation ? 'Остановить передачу геопозиции диспетчеру' : 'Поделиться геопозицией с диспетчером'} title={locationShareError || (sharingLocation ? gpsFix ? 'Геопозиция передаётся' : `GPS: ${gpsStatus}` : onShift ? 'Поделиться геопозицией' : 'Начните смену для передачи геопозиции')} disabled={!onShift && !sharingLocation} onClick={() => { setSharingLocation(value => !value); if (!sharingLocation) toast.info('Передача геопозиции включена. Ожидаем координаты GPS.'); }}><Navigation size={21} /><i /></button>
-            {task && <div className="map-task glass"><MapPin size={16} /><div><b>{navigationHint?.text || task.stand}</b><span>{task.status === 'enroute' ? `${task.travel_mode === 'vehicle' ? 'Спецтранспорт' : 'Пешком'} · ${Math.round(navigationHint?.remaining ?? 0)} м · ${mmss(task.eta_left)}` : task.status_ru}</span></div></div>}
+            {task && <div className="map-task glass"><MapPin size={16} /><div><b>{navigationHint?.text || task.stand}</b><span>{task.status === 'enroute' ? `${task.travel_mode === 'vehicle' ? 'Спецтранспорт' : 'Пешком'} · ${Math.round(navigationHint?.remaining ?? 0)} м · ${mmss(task.eta_left)} · ${(state.techs.find(t => t.id === task.tech_id)?.speed_kmh ?? 0).toFixed(1)} км/ч` : task.status_ru}</span></div></div>}
           </div>
         )}
         {tab === 'chat' && <div className="eng-chat"><ChatView /></div>}
@@ -144,7 +145,7 @@ function TaskTab({ task, onMap, onChat }: { task: Request | null; onMap(): void;
   const onShift = state.account?.on_shift ?? me.on_shift;
   const [shiftDlg, setShiftDlg] = useState(false);
   const done = state.history.length;
-  const times = state.history.filter(r => r.arrived_sim != null).map(r => (r.arrived_sim! - r.created_sim));
+  const times = state.history.filter(r => r.arrived_sim != null).map(r => (r.response_sec ?? r.elapsed));
   const avg = times.length ? times.reduce((a, b) => a + b, 0) / times.length : null;
   const sla = times.length ? Math.round(times.filter(t => t <= NORM).length / times.length * 100) : null;
 
@@ -174,7 +175,7 @@ function TaskTab({ task, onMap, onChat }: { task: Request | null; onMap(): void;
       <section className="eng-section">
         <h3>История смены</h3>
         {state.history.length ? [...state.history].reverse().slice(0, 12).map(r => (
-          <div key={r.id} className="hist"><span className="mono">{r.stand}</span><div><b>{r.description}</b><span>{simClock(r.created_sim)} · прибытие {r.arrived_sim != null ? mmss(r.arrived_sim - r.created_sim) : '—'}</span></div><Check size={16} className="t-green" /></div>
+          <div key={r.id} className="hist"><span className="mono">{r.stand}</span><div><b>{r.description}</b><span>{simClock(r.created_sim)} · прибытие {r.arrived_sim != null ? mmss(r.response_sec ?? r.elapsed) : '—'}</span></div><Check size={16} className="t-green" /></div>
         )) : <p className="muted">Закрытых заявок пока нет.</p>}
       </section>
 
@@ -189,15 +190,19 @@ function TaskTab({ task, onMap, onChat }: { task: Request | null; onMap(): void;
 function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): void }) {
   const state = useOps(s => s.state)!;
   const dispatcher = useDispatcher();
+  const technician = state.techs.find(t => t.id === r.tech_id);
   const callPhase = useCall(s => s.phase);
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState(false);
+  const [declining, setDeclining] = useState(false);
+  const [declineReason, setDeclineReason] = useState('');
+  const [declineBusy, setDeclineBusy] = useState(false);
   const aircraft = state.aircraft.find(a => a.id === r.aircraft_id || (a.stand === r.stand && a.status === 'parked'));
-  const elapsed = r.arrived_sim != null ? r.arrived_sim - r.created_sim : r.elapsed;
+  const elapsed = r.response_sec ?? r.elapsed;
   const pct = Math.min(1, elapsed / NORM);
   const em = r.priority === 'emergency';
   const stepIdx = ({ assigned: 1, enroute: 1, arrived: 2, working: 3 } as Record<string, number>)[r.status] ?? 0;
-  const next = ({ assigned: ['arrive', 'Я на месте', MapPin], enroute: ['arrive', 'Я на месте', MapPin], arrived: ['start', 'Начать работу', Play], working: ['resolve', 'Работа выполнена', Flag] } as Record<string, [string, string, any]>)[r.status];
+  const next = ({ working: ['resolve', 'Работа выполнена', Flag] } as Record<string, [string, string, any]>)[r.status];
   const checkKey = `rp.check.${r.id}`;
   const items = CHECKLISTS[r.qual] ?? CHECKLISTS['Планер'];
   const [checked, setChecked] = useState<number[]>(() => { try { return JSON.parse(localStorage.getItem(checkKey) || '[]'); } catch { return []; } });
@@ -214,6 +219,19 @@ function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): v
     try { if (next[0] === 'accept') await act.acceptRequest(r.id); else await act.engineerStep(r.id, next[0] as any); toast.ok(next[0] === 'arrive' ? 'Прибытие отмечено' : 'Работа начата'); await useOps.getState().reload(); }
     catch (e) { toast.bad(errorText(e)); }
     finally { setBusy(false); }
+  }
+
+  async function decline() {
+    const reason = declineReason.trim();
+    if (reason.length < 3) { toast.bad('Укажите причину отказа'); return; }
+    setDeclineBusy(true);
+    try {
+      await act.declineRequest(r.id, reason);
+      setDeclining(false);
+      toast.ok('Заявка возвращена диспетчеру');
+      await useOps.getState().reload();
+    } catch (e) { toast.bad(errorText(e)); }
+    finally { setDeclineBusy(false); }
   }
 
   async function quick(sticker: string, text: string) {
@@ -240,9 +258,11 @@ function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): v
       {r.extra && <p className="muted small">{r.extra}</p>}
 
       <div className="task-facts">
+        <div><span>Скорость движения</span><b>{(technician?.speed_kmh ?? 0).toFixed(1)} км/ч</b></div>
+        <div><span>Лимит участка</span><b>{technician?.speed_limit_kmh == null ? "—" : `${technician.speed_limit_kmh.toFixed(0)} км/ч`}</b></div>
         <div><span>{r.status === 'enroute' ? 'Прибытие через' : 'Статус'}</span><b className="mono">{r.status === 'enroute' ? mmss(r.eta_left) : r.status_ru}</b></div>
         <div><span>Как добираться</span><b>{r.travel_mode === 'vehicle' ? <><Car size={14} />машина</> : <><Footprints size={14} />пешком</>}</b></div>
-        <div><span>С вызова</span><b className={cx('mono', r.elapsed > NORM && 't-red')}>{mmss(r.elapsed)}</b></div>
+        <div><span>{["arrived","working","done"].includes(r.status) ? "Прибыл за" : "С вызова"}</span><b className={cx('mono', r.elapsed > NORM && 't-red')}>{mmss(r.elapsed)}</b></div>
       </div>
 
       <ol className="stepper">
@@ -251,6 +271,7 @@ function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): v
         ))}
       </ol>
 
+      {['assigned','enroute','arrived'].includes(r.status) && <p className="muted small">После прибытия к месту назначения работа начнётся автоматически. Для реальной поездки включите передачу GPS, для проверки — симуляцию у диспетчера.</p>}
       {next && <Button variant={next[0] === 'resolve' ? 'success' : 'primary'} size="lg" block loading={busy} icon={(() => { const I = next[2]; return <I size={20} />; })()} onClick={advance} className="task-cta">{next[1]}</Button>}
 
       <div className="task-actions">
@@ -273,6 +294,12 @@ function TaskCard({ r, onMap, onChat }: { r: Request; onMap(): void; onChat(): v
         </section>
       )}
 
+      {['assigned', 'enroute', 'arrived'].includes(r.status) && <Button variant="danger" block onClick={() => {setDeclineReason('');setDeclining(true);}}>Отказаться от заявки</Button>}
+      <Modal open={declining} onClose={() => {if (!declineBusy) setDeclining(false);}} eyebrow={`Заявка #${r.id} · ${r.stand}`} title="Отказ от заявки"
+        footer={<><Button disabled={declineBusy} onClick={() => setDeclining(false)}>Назад</Button><Button variant="danger" loading={declineBusy} disabled={declineReason.trim().length < 3} onClick={decline}>Подтвердить отказ</Button></>}>
+        <p className="muted">Заявка вернётся диспетчеру для нового назначения. Причина сохранится в журнале и общем канале смены. Время ожидания не обнулится.</p>
+        <label className="field"><span>Причина отказа</span><textarea rows={4} maxLength={1000} value={declineReason} onChange={e => setDeclineReason(e.target.value)} placeholder="Например: нет необходимого инструмента или допуска к этому виду работ" autoFocus /></label>
+      </Modal>
       <ReportModal open={report} r={r} checked={checked.map(i => items[i])} onClose={() => setReport(false)} />
     </article>
   );
@@ -326,7 +353,7 @@ function ProfileTab() {
       <div className="list-card">
         <div><span>Квалификация</span><b style={{ color: qualColor(me.qual) }}>{me.qual}</b></div>
         <div><span>База</span><b>{me.base}</b></div>
-        <div><span>Скорость</span><b>{tech?.speed ?? '—'} м/с</b></div>
+        <div><span>Скорость движения</span><b>{(tech?.speed_kmh ?? 0).toFixed(1)} км/ч</b></div>
         <div><span>Email</span><b>{me.email}</b></div>
       </div>
       <button className="list-link" onClick={() => setSettings(true)}><UserRound size={18} /><span>Профиль, безопасность и звук</span><ChevronRight size={18} /></button>

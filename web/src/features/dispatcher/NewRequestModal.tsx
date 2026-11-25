@@ -1,5 +1,7 @@
+import { AirportMap } from '../map/AirportMap';
+import { nearestWaypoint } from '../../lib/waypoints';
 import { useEffect, useState } from 'react';
-import { AlertOctagon, Send } from 'lucide-react';
+import { AlertOctagon, Send, MapPin, ArrowUp, ArrowDown, X } from 'lucide-react';
 import { useOps, act } from '../../store/ops';
 import { Button, Field, Modal, Switch, toast } from '../../components/ui';
 import { errorText, get } from '../../lib/api';
@@ -20,11 +22,12 @@ export function NewRequestModal({ open, stand, onClose, onCreated }: { open: boo
   const [f, setF] = useState<{ stand: string; description: string; qual: string; extra: string; tech_id: number | null }>({ stand: '', description: '', qual: 'auto', extra: '', tech_id: null });
   const [em, setEm] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [via, setVia] = useState<string[]>([]);
   useEffect(() => {
     if (open) setF({ stand: stand || state?.aircraft.find(a => a.status === 'parked')?.stand || airport?.stands[0]?.id || '', description: '', qual: 'auto', extra: '', tech_id: null });
     if (open) setEm(false);
-    if (open) setVia([]);
+    if (open) { setVia([]); setPicking(false); }
   }, [open, stand]);
   const aircraft = state?.aircraft.find(a => a.stand === f.stand && a.status === 'parked');
   const [quals, setQuals] = useState<string[]>([]);
@@ -44,7 +47,7 @@ export function NewRequestModal({ open, stand, onClose, onCreated }: { open: boo
   }
 
   return (
-    <Modal open={open} onClose={onClose} eyebrow="Новая работа" title="Создать заявку" width={540}
+    <Modal open={open} onClose={onClose} eyebrow="Новая работа" title="Создать заявку" width={picking ? 900 : 540}
       footer={<><Button onClick={onClose}>Отмена</Button><Button variant={em ? 'danger' : 'primary'} icon={<Send size={16} />} loading={busy} onClick={submit}>{em ? 'Создать ЧС' : 'Создать заявку'}</Button></>}>
       <div className="row-2">
         <Field label="Стоянка" hint={aircraft ? <span className="t-green">{aircraft.flight} · {aircraft.model}</span> : 'Борт на стоянке отсутствует'}>
@@ -60,11 +63,37 @@ export function NewRequestModal({ open, stand, onClose, onCreated }: { open: boo
       <Field label="Неисправность">
         <textarea rows={3} value={f.description} onChange={e => setF(v => ({ ...v, description: e.target.value }))} placeholder="Что случилось с бортом?" autoFocus />
       </Field>
-      {via.map((node, index) => <Field key={index} label={`Промежуточный узел ${index + 1}`}>
-        <div className="row-2"><input list="airport-route-nodes" value={node} onChange={e => setVia(items => items.map((item, i) => i === index ? e.target.value : item))} placeholder="Код узла на схеме" /><Button onClick={() => setVia(items => items.filter((_, i) => i !== index))}>Убрать</Button></div>
-      </Field>)}
-      {via.length < 3 && <Button onClick={() => setVia(items => [...items, ''])}>Добавить точку маршрута</Button>}
-      <datalist id="airport-route-nodes">{airport?.nodes.map(node => <option key={node.id} value={node.id}>{Math.round(node.x)}, {Math.round(node.y)}</option>)}</datalist>
+      <Field label="Промежуточные точки" hint="Инженер пройдёт их в указанном порядке перед прибытием на заявку.">
+        <Button icon={<MapPin size={16}/>} onClick={() => setPicking(value => !value)}>{picking ? 'Скрыть карту' : via.length ? 'Изменить точки на карте' : 'Выбрать на карте'}</Button>
+      </Field>
+      {picking && <section className="waypoint-picker">
+        <p className="muted small">Нажимайте на дороги ВДНХ. Номера показывают порядок прохождения. Карту можно перемещать и приближать.</p>
+        <div className="waypoint-map"><AirportMap compact selection={{request:null,tech:null,aircraft:null,stand:f.stand || null}} waypoints={via}
+          onReady={engine => engine.fitAll()}
+          onPoint={(x,y) => {
+            if (!airport) return;
+            if (via.length >= 32) { toast.bad('Можно выбрать не больше 32 точек'); return; }
+            const node=nearestWaypoint(airport,x,y,state?.blocked ?? []);
+            if (!node) { toast.info('Нажмите ближе к доступной дороге, при необходимости приблизьте карту'); return; }
+            if (via.includes(node.id)) { toast.info('Эта точка уже добавлена'); return; }
+            setVia(items => [...items,node.id]);
+          }} /></div>
+        <div className="row-2"><span className="muted small">Выбрано: {via.length} / 32</span><Button onClick={() => setPicking(false)}>Готово</Button></div>
+      </section>}
+      {via.length > 0 && <ol className="waypoint-list">{via.map((id,index) => {
+        const node=airport?.nodes.find(n => n.id===id);
+        const nearby=node && airport?.areas?.map(area => {
+          const count=area.points.length || 1;
+          const x=area.points.reduce((sum,p)=>sum+p[0],0)/count,y=area.points.reduce((sum,p)=>sum+p[1],0)/count;
+          return {name:area.name,distance:Math.hypot(x-node.x,y-node.y)};
+        }).filter(a=>a.name && a.distance<150).sort((a,b)=>a.distance-b.distance)[0]?.name;
+        const move=(offset:number)=>setVia(items=>{const next=[...items];[next[index],next[index+offset]]=[next[index+offset],next[index]];return next;});
+        return <li key={id}><b>{index+1}</b><span>Точка {index+1}{nearby && <small>Рядом: {nearby}</small>}</span>
+          <button type="button" disabled={index===0} aria-label={`Точку ${index+1} раньше`} onClick={()=>move(-1)}><ArrowUp size={16}/></button>
+          <button type="button" disabled={index===via.length-1} aria-label={`Точку ${index+1} позже`} onClick={()=>move(1)}><ArrowDown size={16}/></button>
+          <button type="button" aria-label={`Удалить точку ${index+1}`} onClick={()=>setVia(items=>items.filter(item=>item!==id))}><X size={16}/></button>
+        </li>;
+      })}</ol>}
       <div className="chips templates">{TEMPLATES.map(t => <button key={t.text} type="button" className="chip" onClick={() => setF(v => ({ ...v, description: t.text, qual: t.qual }))}>{t.text}</button>)}</div>
       <Field label="Дополнительно"><input value={f.extra} onChange={e => setF(v => ({ ...v, extra: e.target.value }))} placeholder="Необязательно: наблюдения экипажа, код ошибки" /></Field>
       <label className={cx('em-toggle', em && 'on')}><AlertOctagon size={18} /><span><b>Чрезвычайная ситуация</b><small>Наивысший приоритет, ближайший инженер даже вне норматива</small></span><Switch checked={em} onChange={setEm} label="ЧС" /></label>

@@ -80,6 +80,20 @@ export const useOps = create<OpsStore>((set, getState) => ({
 
   handle(packet) {
     const kind = packet.kind;
+    if (kind === 'request_status_changed' && (packet.payload as any)?.event === 'declined') {
+      if (getState().me?.role === 'dispatcher') {
+        const event = packet.payload as any;
+        void import('../components/ui').then(({ toast }) => toast.bad(`${event.engineer}: ${event.reason}`, `Отказ от заявки #${event.id}`));
+      }
+      clearTimeout(reloadTimer);
+      void getState().reload();
+      return;
+    }
+    if (kind === 'request_status_changed' && (packet.payload as any)?.automatic) {
+      clearTimeout(reloadTimer);
+      void getState().reload();
+      return;
+    }
     if (kind === 'request_assigned') {
       clearTimeout(reloadTimer);
       void getState().reload();
@@ -113,6 +127,7 @@ function applySimulationDelta(state: ShiftState, payload: any) {
   const { aircraft: aircraftDeltas = [], techs: techDeltas = [], ...simulation } = payload || {};
   const previous = Number(state.sim_time || 0);
   Object.assign(state, simulation);
+  if (!state.sim_running) state.techs.forEach(t => { t.speed_kmh = 0; t.speed = 0; });
   const step = Math.max(0, Number(state.sim_time || 0) - previous);
   const techs = new Map(state.techs.map(t => [t.id, t]));
   const authoritativeEta = new Map<number, number>();
@@ -123,7 +138,7 @@ function applySimulationDelta(state: ShiftState, payload: any) {
   }
   if (step > 0) {
     for (const r of state.active) {
-      if (['waiting', 'enroute', 'assigned', 'arrived', 'working'].includes(r.status)) {
+      if (['waiting', 'enroute', 'assigned'].includes(r.status) && r.arrived_sim == null) {
         r.elapsed = Number(r.elapsed || 0) + step;
         if (r.status === 'enroute' && r.eta_left != null && !authoritativeEta.has(r.id)) r.eta_left = Math.max(0, r.eta_left - step);
       }
@@ -142,6 +157,7 @@ export const act = {
   sim: (body: { speed?: number; running?: boolean; spawn_at_terminal?: boolean }) => post('/api/sim', body),
   createRequest: (body: { stand: string; description: string; qual: string; extra: string; priority: string; via?: string[]; tech_id?: number | null }) => post('/api/requests', body),
   assignRequest: (id: number, tech_id: number, confirm_reassignment = false) => post(`/api/requests/${id}/assign`, { tech_id, confirm_reassignment }),
+  declineRequest: (id: number, reason: string) => post(`/api/engineer/requests/${id}/decline`, { reason }),
   acceptRequest: (id: number) => post(`/api/requests/${id}/status`, { status: 'enroute' }),
   dispatcherStep: (id: number, step: 'arrive' | 'start' | 'resolve' | 'cancel', confirm_shift_lead = false) => step === 'cancel'
     ? post(`/api/requests/${id}/status`, { status: 'cancelled', confirm_shift_lead })

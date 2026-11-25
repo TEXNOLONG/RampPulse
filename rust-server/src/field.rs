@@ -112,7 +112,7 @@ pub(super) fn apply_fix(
         .map_err(|_| HttpError(StatusCode::INTERNAL_SERVER_ERROR, "Cannot read assignments"))?;
     for req in requests
         .iter()
-        .filter(|r| r.status == "enroute" && r.tech_id == Some(tech))
+        .filter(|r| matches!(r.status.as_str(),"assigned"|"enroute"|"arrived") && r.tech_id == Some(tech))
     {
         let node = map["stands"]
             .as_array()
@@ -129,7 +129,8 @@ pub(super) fn apply_fix(
         if user.role != "engineer" {
             continue;
         }
-        if let Ok(arrived) = state.store.transition_request(req.id, "arrived", user) {
+        if let Ok(Some(arrived)) = state.store.automatic_arrival_and_start(req.id, tech, "gps",1.0) {
+            state.engine.stop_request_route(tech,req.id);
             let entity = Some(EntityRef {
                 kind: "request".into(),
                 id: req.id.to_string(),
@@ -141,7 +142,7 @@ pub(super) fn apply_fix(
                     target,
                     None,
                     entity.clone(),
-                    json!({"id":req.id,"status":"arrived","source":"gps"}),
+                    json!({"id":req.id,"status":"working","source":"gps","automatic":true}),
                 );
             }
         }

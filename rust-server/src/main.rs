@@ -158,6 +158,11 @@ struct CreateRequestBody {
 }
 
 #[derive(Deserialize)]
+struct DeclineRequestBody {
+    reason: String,
+}
+
+#[derive(Deserialize)]
 struct RequestStatusBody {
     status: String,
     #[serde(default)]
@@ -362,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/security", get(security_status).post(security_change))
         .route("/api/journal", get(request_journal))
         .route("/api/requests/{id}/assign", post(assign_request))
+        .route("/api/engineer/requests/{id}/decline", post(engineer_request_decline))
         .route("/api/requests/{id}/arrive", post(dispatcher_request_arrive))
         .route("/api/requests/{id}/start", post(dispatcher_request_start))
         .route(
@@ -454,6 +460,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             ticker.tick().await;
             if let Ok(Some(payload)) = tick_engine.tick(1.0) {
+                for tech in payload["techs"].as_array().into_iter().flatten().filter(|t|t["arrived"]==true) {
+                    let (Some(tech_id),Some(request_id))=(tech["id"].as_i64(),tech["request_id"].as_i64()) else { continue };
+                    let store=tick_store.clone();
+                    let scale=payload["sim_speed"].as_f64().unwrap_or(1.0);
+                    match task::spawn_blocking(move ||store.automatic_arrival_and_start(request_id,tech_id,"simulation",scale)).await {
+                        Ok(Ok(Some(request))) => {
+                            tick_engine.stop_request_route(tech_id,request_id);
+                            for role in ["dispatcher","engineer"] {
+                                tick_hub.publish(EventKind::RequestStatusChanged,Audience::Role(role.into()),None,
+                                    Some(EntityRef{kind:"request".into(),id:request_id.to_string(),version:request.version as u64}),
+                                    json!({"id":request_id,"status":"working","source":"simulation","automatic":true}));
+                            }
+                        }
+                        Ok(Err(error))=>eprintln!("Could not record simulated arrival for request {request_id}: {error}"),
+                        Err(error)=>eprintln!("Arrival task failed: {error}"),
+                        _=>{}
+                    }
+                }
+
                 for aircraft in payload["aircraft"].as_array().into_iter().flatten() {
                     let Some(id) = aircraft["id"].as_i64() else { continue };
                     let status = aircraft["status"].as_str().unwrap_or_default().to_owned();
@@ -950,6 +975,19 @@ async fn state_snapshot(
         )
     })?;
     let mut snapshot = state.engine.snapshot(&requests, &engineers, Some(&user));
+    if snapshot["sim_running"] == false {
+        if let Ok(locations) = state.engineer_locations.lock() {
+            for tech in snapshot["techs"].as_array_mut().into_iter().flatten() {
+                if let Some((location, received)) = tech["id"].as_i64().and_then(|id| locations.get(&id)) {
+                    if received.elapsed().as_secs() < 30 {
+                        tech["speed_kmh"] = location.speed.filter(|s| s.is_finite() && *s >= 0.0).map_or(Value::Null, |s| json!(s * 3.6));
+                        tech["speed_source"] = json!("gps");
+                    }
+                }
+            }
+        }
+    }
+
     if user.role == "dispatcher" {
         let audit_store = state.store.clone();
         let audit_requests = snapshot["active"].as_array().cloned().unwrap_or_default();
@@ -1795,6 +1833,45 @@ async fn dispatcher_request_cancel(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     legacy_request_status(state, headers, id, "cancelled", "dispatcher").await
 }
+async fn engineer_request_decline(
+    State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap,
+    Json(body): Json<DeclineRequestBody>,
+) -> Result<Json<Value>, HttpError> {
+    let user = authenticated_user(&state, &headers).await?;
+    if user.role != "engineer" { return Err(HttpError(StatusCode::FORBIDDEN,"Отказ доступен только инженеру")); }
+    let reason = body.reason.trim().to_owned();
+    if !(3..=1000).contains(&reason.chars().count()) {
+        return Err(HttpError(StatusCode::BAD_REQUEST,"Укажите причину отказа: от 3 до 1000 символов"));
+    }
+    let store = state.store.clone(); let actor = user.clone(); let decline_reason = reason.clone();
+    let request = task::spawn_blocking(move || store.decline_request(id,&decline_reason,&actor)).await
+        .map_err(|_|HttpError(StatusCode::INTERNAL_SERVER_ERROR,"Ошибка сервера"))?
+        .map_err(|_|HttpError(StatusCode::CONFLICT,"Отказ невозможен: заявка уже изменена, назначена другому инженеру или работа начата"))?;
+    if let Some(tech_id)=user.tech_id { state.engine.stop_request_route(tech_id,id); }
+    let payload=json!({"id":id,"status":"waiting","event":"declined","reason":reason,"engineer":user.name});
+    let entity=Some(EntityRef{kind:"request".into(),id:id.to_string(),version:request.version as u64});
+    let actor=Some(ActorRef{user_id:user.id,role:user.role.clone()});
+    for audience in [Audience::Role("dispatcher".into()),Audience::User(user.id)] {
+        state.realtime.publish(EventKind::RequestStatusChanged,audience,actor.clone(),entity.clone(),payload.clone());
+    }
+    // The announcement is committed with the refusal; publish the saved message to chat clients.
+    let store=state.store.clone();let chat_actor=user.clone();
+    if let Ok(Ok(messages))=task::spawn_blocking(move || {
+        let room=store.chat_rooms(&chat_actor)?.into_iter().find(|r|r.kind=="shift").ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let message=store.chat_messages(room.id,&chat_actor,100)?.into_iter().rev()
+            .find(|m|m.sender_id==chat_actor.id && m.body.starts_with(&format!("Отказ от заявки №{} ·",id)))
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        Ok::<_,rusqlite::Error>((message,store.chat_recipients(room.id,chat_actor.id)?))
+    }).await {
+        let (message,recipients)=messages;
+        for recipient in recipients {
+            state.realtime.publish(EventKind::ChatMessageCreated,Audience::User(recipient),actor.clone(),
+                Some(EntityRef{kind:"chat_message".into(),id:message.id.to_string(),version:1}),serde_json::to_value(&message).unwrap_or(Value::Null));
+        }
+    }
+    Ok(Json(json!({"ok":true,"request":request})))
+}
+
 async fn engineer_request_arrive(
     State(state): State<AppState>,
     Path(id): Path<i64>,

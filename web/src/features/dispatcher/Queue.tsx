@@ -79,7 +79,7 @@ function RequestCard({ r, selected, onClick }: { r: Request; selected: boolean; 
       <dl className="req-kv">
         <div><dt>Инженер</dt><dd className="sans">{r.tech_name || '—'}</dd></div>
         <div><dt>До прибытия</dt><dd><Countdown r={r} /></dd></div>
-        <div><dt>С вызова</dt><dd className={cx(r.elapsed > 900 && 't-red')}>{mmss(r.elapsed)}</dd></div>
+        <div><dt>{["arrived","working","done"].includes(r.status) ? "Прибыл за" : "С вызова"}</dt><dd className={cx(r.elapsed > 900 && 't-red')}>{mmss(r.elapsed)}</dd></div>
       </dl>
       <SlaBar r={r} />
     </article>

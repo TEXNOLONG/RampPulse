@@ -7,6 +7,7 @@ import { cx } from '../../lib/format';
 
 interface Props extends MapCallbacks {
   selection: Selection;
+  waypoints?: string[];
   comparison?: Comparison | null;
   interactiveEdges?: boolean;
   focusTech?: number | null;
@@ -15,7 +16,7 @@ interface Props extends MapCallbacks {
   className?: string;
 }
 
-export function AirportMap({ selection, comparison = null, interactiveEdges = false, focusTech = null, compact, onReady, className, ...callbacks }: Props) {
+export function AirportMap({ waypoints, selection, comparison = null, interactiveEdges = false, focusTech = null, compact, onReady, className, ...callbacks }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const engineRef = useRef<MapEngine | null>(null);
   const cbRef = useRef(callbacks); cbRef.current = callbacks;
@@ -29,13 +30,14 @@ export function AirportMap({ selection, comparison = null, interactiveEdges = fa
   useEffect(() => {
     if (!svgRef.current || !airport) return;
     const engine = new MapEngine(svgRef.current, airport, {
+      onPoint: (x, y) => cbRef.current.onPoint?.(x, y),
       onStand: id => cbRef.current.onStand?.(id),
       onTech: id => cbRef.current.onTech?.(id),
       onAircraft: id => cbRef.current.onAircraft?.(id),
       onEdge: (id, name) => cbRef.current.onEdge?.(id, name),
       onEmpty: () => cbRef.current.onEmpty?.(),
       onView: k => setScale(k),
-    }, { interactiveEdges, showLabels: prefs.mapLabels, showRoutes: prefs.mapRoutes, reduceMotion: prefs.reduceMotion, focusTech });
+    }, { pointSelection: Boolean(callbacks.onPoint), interactiveEdges, showLabels: prefs.mapLabels, showRoutes: prefs.mapRoutes, reduceMotion: prefs.reduceMotion, focusTech });
     engineRef.current = engine;
     onReady?.(engine);
     return () => { engine.destroy(); engineRef.current = null; };
@@ -43,12 +45,14 @@ export function AirportMap({ selection, comparison = null, interactiveEdges = fa
   }, [airport]);
 
   useEffect(() => {
-    engineRef.current?.setOptions({ showLabels: prefs.mapLabels, showRoutes: prefs.mapRoutes, reduceMotion: prefs.reduceMotion, focusTech, interactiveEdges, edgeMode });
-  }, [prefs.mapLabels, prefs.mapRoutes, prefs.reduceMotion, focusTech, interactiveEdges, edgeMode]);
+    engineRef.current?.setOptions({ pointSelection: Boolean(callbacks.onPoint), showLabels: prefs.mapLabels, showRoutes: prefs.mapRoutes, reduceMotion: prefs.reduceMotion, focusTech, interactiveEdges, edgeMode });
+  }, [prefs.mapLabels, prefs.mapRoutes, prefs.reduceMotion, focusTech, interactiveEdges, edgeMode, Boolean(callbacks.onPoint)]);
 
   useEffect(() => {
     if (state) engineRef.current?.update(state, selection, comparison);
   }, [state, tick, selection.request, selection.tech, selection.aircraft, selection.stand, comparison]);
+
+  useEffect(() => { engineRef.current?.setWaypoints(waypoints ?? []); }, [airport, waypoints]);
 
   const scaleBar = niceScale(scale);
   const me = focusTech != null ? state?.techs.find(t => t.id === focusTech) : null;
